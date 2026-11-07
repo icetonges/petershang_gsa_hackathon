@@ -39,6 +39,7 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+LOCAL_REPO_ROOT="$(cygpath -w "${REPO_ROOT}")"
 
 echo "=== Target ==="
 echo "  app name:         ${APP_NAME}"
@@ -88,11 +89,11 @@ fi
 # --- Sync the repo source to the workspace path -------------------------------
 # `databricks sync` uploads the repo (respecting .gitignore) to SOURCE_CODE_PATH.
 echo "=== Syncing source to ${SOURCE_CODE_PATH} ==="
-databricks "${PROFILE_ARGS[@]}" sync "${REPO_ROOT}" "${SOURCE_CODE_PATH}"
+MSYS_NO_PATHCONV=1 databricks "${PROFILE_ARGS[@]}" sync "${LOCAL_REPO_ROOT}" "${SOURCE_CODE_PATH}"
 
 # --- Deploy -------------------------------------------------------------------
 echo "=== Deploying app '${APP_NAME}' from ${SOURCE_CODE_PATH} ==="
-databricks "${PROFILE_ARGS[@]}" apps deploy "${APP_NAME}" \
+MSYS_NO_PATHCONV=1 databricks "${PROFILE_ARGS[@]}" apps deploy "${APP_NAME}" \
   --source-code-path "${SOURCE_CODE_PATH}"
 
 # --- Report the app URL -------------------------------------------------------
