@@ -1,59 +1,58 @@
-# Deploying Your MCP Server
+# Deploying
 
-Local development runs your server over **stdio** (how Claude Desktop / Claude
-Code launch it). To share it with an agent platform, deploy it to a host that
-serves it over **streamable-HTTP**, then register it.
+Local development runs the server over **stdio**, which is how Claude
+Desktop and Claude Code launch it. To share it with an agent platform, deploy
+it somewhere that serves **streamable HTTP**, then register it.
 
-This template ships deployment kits for two targets:
+This repository ships one deployment kit: **Databricks Apps**.
 
-| Target | Kits | Transport | When to use |
+| Target | Kit | Transport | When |
 |---|---|---|---|
-| **IBM watsonx Orchestrate** | [`ibm/`](ibm/) — 3 kits | stdio (local) **or** streamable-HTTP (Code Engine) | You're evaluating/agent-building in watsonx Orchestrate |
-| **Databricks** | [`databricks/`](databricks/) | streamable-HTTP (Databricks Apps) | You're deploying alongside a Databricks workspace |
+| Databricks Apps | [`databricks/`](databricks/) | streamable HTTP | The hackathon workspace, and anywhere agents already live in Databricks |
 
-## The server code doesn't change
+## The server code does not change
 
-Every kit runs the **same** server in `src/example_server/`. The entry point
-`app.py` auto-selects its transport:
+`src/mcp_server_creator/app.py` selects its transport at startup:
 
-- a platform port (`DATABRICKS_APP_PORT` or `PORT`) → **HTTP** on that port;
+- a platform port (`DATABRICKS_APP_PORT`, or a generic `PORT`) → HTTP on that
+  port, bound to `0.0.0.0`;
 - `MCP_TRANSPORT=streamable-http` → HTTP on `MCP_HOST:MCP_PORT`;
-- otherwise → **stdio**.
+- otherwise → stdio.
 
-So IBM Code Engine and Databricks Apps both "just work" — they inject a port and
-the server serves HTTP with `/mcp` + `/health`.
+So Databricks Apps works with no code change: it injects a port, and the
+server serves `/mcp` and `/health`.
 
-## IBM (three options, lowest → highest overhead)
+## Databricks Apps
 
-See [`ibm/README.md`](ibm/README.md) for the full chooser. In short:
+See [`databricks/README.md`](databricks/README.md). The kit syncs this
+repository to the workspace and runs `databricks apps deploy`. Three rules
+decide whether it works at all:
 
-1. **[`ibm/local-mcp-toolkit/`](ibm/local-mcp-toolkit/)** — ship the code; run it
-   over stdio **inside** Orchestrate. No HTTP, no container, no registry.
-   **Lowest overhead — recommended for first-timers.**
-2. **[`ibm/code-engine-git-build/`](ibm/code-engine-git-build/)** — Code Engine
-   builds from your public Git repo and pushes to your Container Registry.
-   Needs ICR authority.
-3. **[`ibm/prebuilt-image/`](ibm/prebuilt-image/)** — deploy a prebuilt public
-   image to Code Engine (or build from Git). Lowest cloud authority.
-
-## Databricks
-
-See [`databricks/README.md`](databricks/README.md). Deploy as a Databricks App:
-the kit syncs your repo to the workspace and runs `databricks apps deploy`. The
-app is gated by workspace auth, so clients present a bearer token.
+1. **The app name starts with `mcp-`.** Without the prefix the app deploys
+   and is never offered as an MCP server in AI Playground or Unity Gateway.
+2. **Grant the app's service principal, not yourself.** The app runs as its
+   own identity. This is the most common cause of a server that works
+   locally and returns nothing once deployed.
+3. **Callers need `CAN USE` on the app and an OAuth token.** Personal access
+   tokens are not supported.
 
 ## cloud.gov (bonus)
 
-Not a full kit, but the repo root includes a `manifest.yaml` for cloud.gov
-(Cloud Foundry). Deploy with `cf push` after `cf login`/`cf target`. See the
-comments in `manifest.yaml`.
+The repository root also carries a `manifest.yaml` for cloud.gov (Cloud
+Foundry): `cf push` after `cf login` and `cf target`. Not a maintained kit,
+but it works and costs nothing to keep.
+
+## Containers
+
+The root `Dockerfile` builds an image serving streamable HTTP on `:8080`.
+Databricks Apps does not use it; any other container host can.
 
 ---
 
 ## Security reminder
 
-All kits expose the MCP endpoint with **no authentication** by default (except
-Databricks, which is gated by workspace SSO). That matches a public-data
-hackathon posture. For anything beyond a hackathon, front the endpoint with auth
-and review your agency's ATO requirements. Never commit secrets — each kit's
-`.env` is git-ignored and holds coordinates only.
+A Databricks App sits behind workspace authentication, so an unauthenticated
+probe returning 302 or 401 is the app working, not failing. For anything
+beyond a hackathon, review your agency's ATO requirements before exposing an
+endpoint. Never commit secrets: every `.env` here is git-ignored and holds
+coordinates only.

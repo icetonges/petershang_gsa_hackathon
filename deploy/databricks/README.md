@@ -8,7 +8,7 @@ and exposes it behind your workspace's authentication.
 - **Port:** Databricks injects `DATABRICKS_APP_PORT` (defaults to `8000`); this
   template's `app.py` detects it and serves HTTP automatically — no code changes.
 
-> **How the template already supports this:** `src/example_server/app.py` checks
+> **How the template already supports this:** `src/mcp_server_creator/app.py` checks
 > for `DATABRICKS_APP_PORT` (and generic `PORT`) and switches to streamable-HTTP
 > on that port. That's the only wiring Databricks Apps needs.
 
@@ -107,7 +107,7 @@ DATABRICKS_TOKEN="$(databricks auth token --output json | jq -r .access_token)" 
 ## Part 3 — Connect a client
 
 Databricks Apps are gated by workspace auth, so an MCP client must present a
-bearer token. For **watsonx Orchestrate** or **Claude** (remote HTTP), register
+bearer token. For **Claude** or any other remote-HTTP client, register
 the endpoint and supply the token as an `Authorization: Bearer <token>` header
 via the client's connection/credential mechanism.
 
@@ -116,7 +116,7 @@ For a quick local test with an MCP client that supports HTTP + headers:
 ```json
 {
   "mcpServers": {
-    "example-mcp": {
+    "mcp-server-creator": {
       "type": "http",
       "url": "https://<app-url>/mcp",
       "headers": { "Authorization": "Bearer <DATABRICKS_TOKEN>" }
@@ -156,10 +156,33 @@ databricks apps delete "${APP_NAME}"
 - **Auth-gated by default:** Databricks Apps sit behind workspace SSO/OAuth, so
   unauthenticated probes return 302/401 — that's expected, not a failure. Use a
   bearer token to reach the app programmatically.
-- **Renamed package:** if you renamed `example_server`, update the module path in
-  `app.yaml` (`python -m <your_pkg>.app`).
+- **Renamed package:** if you renamed `mcp_server_creator`, update the module path in
+  `app.yaml` (`python -m mcp_server_creator.app`).
 - **`app.yaml` location:** Databricks reads `app.yaml` from the deployed source
   root. The deploy script stages this kit's copy at the repo root for the sync
   and removes it afterward; if you prefer, commit a copy at the repo root instead.
 - **Stateless HTTP:** the server runs stateless streamable-HTTP, which scales
   cleanly on Apps (no sticky sessions required).
+
+## The `mcp-` prefix is not optional
+
+`APP_NAME` must start with `mcp-`. AI Playground and Unity Gateway use the
+prefix to recognize an app as an MCP server; without it the app deploys
+normally and is never offered as an MCP.
+
+## Grant the service principal, not yourself
+
+The app runs as its own identity, shown under **App Authorization** on the
+app's page. This server needs a Unity Catalog grant only if you enable live
+table profiling, in which case the service principal needs `USE CATALOG`,
+`USE SCHEMA`, `SELECT` on the table being profiled, and `CAN USE` on the
+warehouse bound in `app.yaml`.
+
+Servers this one *generates* ship their own `deploy/databricks/grants.sql`
+listing exactly what they need.
+
+## Registering it
+
+- Workspace UI: Unity Gateway, then MCPs, then + MCP.
+- Coding agents: `ug mcp add --names "app:mcp-server-creator"`.
+- Python agents: pass `https://<app-url>/mcp` to the framework's MCP client.

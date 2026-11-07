@@ -1,7 +1,7 @@
 [project]
-name = "example-server"
+name = "mcp-server-creator"
 version = "0.1.0"
-description = "Starter MCP server for the GSA MCP hackathon"
+description = "An MCP server that builds custom MCP servers on Databricks"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -9,23 +9,35 @@ dependencies = [
     "httpx>=0.27.0",
     "pydantic>=2.0.0",
     "pydantic-settings>=2.0.0",
+    # A code generator formats its own output, so ruff is a runtime
+    # dependency rather than a dev one.
+    "ruff>=0.6.0",
+]
+
+[project.optional-dependencies]
+# Needed only for live Unity Catalog inspection and for generated servers
+# that read governed data. The server runs fully without them.
+databricks = [
+    "databricks-sdk>=0.30.0",
+    "databricks-sql-connector>=3.0.0",
 ]
 
 [project.scripts]
-# Lets you run the server with `uv run example-server`.
-example-server = "example_server.app:main"
+mcp-server-creator = "mcp_server_creator.app:main"
+# One command that answers "will this even start here?" before anyone
+# connects a client.
+mcp-server-creator-doctor = "mcp_server_creator.doctor:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/example_server"]
+# Includes the bundled skills/ and knowledge/ markdown, which the running
+# server reads at runtime.
+packages = ["src/mcp_server_creator"]
 
 [dependency-groups]
-# Dev + eval-only deps. Install with `uv sync --group dev`.
-# The Phoenix evaluation harness (see eval/) is not scaffolded in this template
-# on purpose — add these when you build it per the mcp-eval skill.
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
@@ -36,8 +48,6 @@ dev = [
 line-length = 88
 target-version = "py311"
 exclude = [".venv", ".agents"]
-# Don't reformat Python code fences inside Markdown docs (they're illustrative
-# snippets, not runnable modules).
 extend-exclude = ["*.md"]
 
 [tool.ruff.lint]

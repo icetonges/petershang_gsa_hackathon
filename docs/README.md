@@ -1,7 +1,7 @@
 # Partner Reference Materials
 
 This directory contains reference materials contributed by vendor partners for
-participants in the GSA MCP Hackathon. IBM and Databricks may submit materials
+participants in the GSA MCP Hackathon. Vendor partners may submit materials
 through pull requests to help participants learn about and use their respective
 platforms during the event.
 

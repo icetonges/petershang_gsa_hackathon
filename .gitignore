@@ -8,14 +8,11 @@ deploy/**/.env
 deploy/**/eval.env
 
 # Deploy kit generated artifacts
-deploy/ibm/local-mcp-toolkit/_stage/
-deploy/ibm/local-mcp-toolkit/_toolkit.generated.yaml
 deploy/**/eval-results/
 
-
-# IBM Bob IDE directory (skills and MCP tool definition)
-.bob/
-
+# Generated projects written by creator_write_project
+generated/
+_generated/
 
 # Python
 __pycache__/
@@ -40,7 +37,6 @@ htmlcov/
 .zed/
 *.swp
 
-# Ignore reference files for Databricks agnet 
+# Reference files for the Databricks eval agent
 eval/databricks/agent_server/agent.py
-eval/databricks/agent_server/utils.py 
-
+eval/databricks/agent_server/utils.py

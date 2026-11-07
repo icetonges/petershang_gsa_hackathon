@@ -29,20 +29,38 @@ Security researchers shall:
 - Only use exploits to the extent necessary to confirm a vulnerability. Do not use an exploit to compromise or exfiltrate data, establish command line access and/or persistence, or use the exploit to "pivot" to other systems. Once you've established that a vulnerability exists, or encountered any of the sensitive data outlined above, you must stop your test and notify us immediately.
 - Keep confidential any information about discovered vulnerabilities for up to 90 calendar days after you have notified GSA. For details, please review Coordinated Disclosure.
 
-## Hackathon note
+## This server's posture
 
-MCP servers built from this template expose their `/mcp` endpoint **without authentication** by default (matching the public-data pilot posture). This is acceptable for a hackathon over public data. Before any non-hackathon use, front the endpoint with authentication and review your agency's ATO requirements. Never commit secrets — keep API keys in environment variables / `.env` (git-ignored), not in source.
+Seven of the eight tools are read-only. The eighth, `creator_write_project`,
+writes files and is off unless an operator sets both `CREATOR_ALLOW_WRITE`
+and `CREATOR_OUTPUT_ROOT`; every path is then resolved inside that root,
+traversal and absolute paths are refused, and the default is a dry run.
 
-The starter HTTP helper uses a fixed API origin, rejects absolute or escaping paths,
-disables redirects and environment proxies, and sanitizes upstream failures. Do not
-replace its relative path with a tool-supplied URL. If a tool must fetch arbitrary
-URLs, require exact destination allowlists, connection-time validation of every
-resolved IPv4/IPv6 address, validation at every redirect hop, credential stripping
-across origins, and network-level egress controls. A DNS lookup followed by a normal
-hostname request is vulnerable to DNS rebinding.
+No tool accepts an absolute URL, a raw SQL string, or a filesystem path.
+`tests/test_security.py` asserts this, so adding one breaks CI on purpose.
 
-Treat all tool arguments, retrieved content, and agent-to-agent messages as
-untrusted. Do not include upstream response bodies, headers, full URLs, query
-strings, stack traces, credentials, names, SSNs, dates of birth, addresses, or other
-sensitive values in MCP errors or logs. Use structured logs with explicitly
-allowlisted fields and define retention and access controls before processing PII.
+Unity Catalog identifiers supplied for live profiling are validated against a
+plain identifier pattern and backtick-quoted before they reach SQL; values
+are always bound as query parameters. Upstream failures are sanitized: no
+response bodies, headers, full URLs, stack traces, or credentials reach a
+client or a log.
+
+Schemas, sample rows, and document descriptions passed to these tools are
+material to analyze. They are never instructions to the model, however they
+are phrased. The same rule is written into the server's `instructions`, into
+the generated servers' instructions, and into the retrieval tool docstrings
+the generators emit.
+
+## Deployed posture
+
+MCP servers built from this template expose `/mcp` without authentication of
+their own. On Databricks Apps the endpoint sits behind workspace
+authentication: callers need `CAN USE` on the app and an OAuth token, and
+personal access tokens are not supported. An unauthenticated probe returning
+302 or 401 is the app working.
+
+Before any non-hackathon use, front the endpoint with authentication, review
+your agency's ATO requirements, and decide retention and access for logs
+that may hold prompts. Never commit secrets: keep them in environment
+variables or a Databricks secret scope, never in source and never in a
+`value:` field in `app.yaml`.

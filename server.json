@@ -1,16 +1,16 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
-  "name": "io.github.GSA-TTS/example-mcp-server",
-  "description": "Starter MCP server for the GSA MCP hackathon. Replace this description and the coordinates below with your own server.",
+  "name": "io.github.icetonges/mcp-server-creator",
+  "description": "An MCP server that builds custom MCP servers on Databricks from a user's intent and their own structured or unstructured data. Ships the skills, the code generators, the Databricks deployment kit, and the review rubric.",
   "repository": {
-    "url": "https://github.com/GSA-TTS/example-mcp-server",
+    "url": "https://github.com/icetonges/mcp-server-creator",
     "source": "github"
   },
   "version": "0.1.0",
   "remotes": [
     {
       "type": "streamable-http",
-      "url": "https://example-mcp-server.app.cloud.gov/mcp"
+      "url": "https://mcp-server-creator.databricksapps.com/mcp"
     }
   ]
 }

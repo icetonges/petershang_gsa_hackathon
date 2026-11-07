@@ -1,46 +1,56 @@
-# Quickstart — Your First MCP Server in 5 Minutes
+# Quickstart
 
-New to MCP? This gets you from clone to a running server connected to a client.
+From clone to building someone's MCP server, in about five minutes.
 
-## 1. Install prerequisites
-
-You need [uv](https://docs.astral.sh/uv/) (a fast Python package manager):
+## 1. Install
 
 ```bash
-pip install uv     # or: brew install uv
-```
-
-## 2. Set up the project
-
-```bash
+pip install uv          # or: brew install uv
 cp .env.example .env
 uv sync
 ```
 
-## 3. Run the server
+## 2. Check it will start
+
+```bash
+uv run mcp-server-creator-doctor
+```
+
+One command, plain language: whether the server imports, which skills
+loaded, what is optional and absent, and what your target environment can
+run. It exits non-zero only when something is genuinely broken rather than
+merely unconfigured.
+
+Add the environment the servers you build will be deployed into, and it
+reports the constraints that apply there:
+
+```bash
+uv run mcp-server-creator-doctor --environment gov_il5
+```
+
+## 3. Run
 
 ```bash
 uv run python main.py
 ```
 
-The server starts in **stdio** mode and waits for a client to connect over
-stdin/stdout. That's correct — it doesn't print a URL, because a local MCP
-server is launched *by* the client as a subprocess. Press `Ctrl-C` to stop it.
+The server starts in **stdio** mode and waits. Nothing prints a URL, which
+is correct: a local MCP server is launched by its client as a subprocess.
+Press Ctrl-C to stop.
 
 ## 4. Connect a client
 
 ### Claude Code
 
-Create or edit `.mcp.json` (or your user MCP settings) with the **absolute path**
-to this repo:
+Create or edit `.mcp.json` with an **absolute path** to this repository:
 
 ```json
 {
   "mcpServers": {
-    "example-mcp": {
+    "mcp-server-creator": {
       "command": "uv",
-      "args": ["run", "example-server"],
-      "cwd": "/absolute/path/to/mcp-hackathon-template"
+      "args": ["run", "mcp-server-creator"],
+      "cwd": "/absolute/path/to/petershang_gsa_hackathon"
     }
   }
 }
@@ -48,45 +58,79 @@ to this repo:
 
 ### Claude Desktop
 
-Add the same block to
+The same block in
 `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or
-`%APPDATA%\Claude\claude_desktop_config.json` (Windows), then restart Claude
-Desktop.
+`%APPDATA%\Claude\claude_desktop_config.json` (Windows), then restart.
 
-Once connected, ask the client to call the example tool, e.g.:
+## 5. Build something
 
-> "Use the example_search_datasets tool to search for 'transportation'."
+Ask the client:
 
-You'll get placeholder results — proof the wiring works. Now replace the example
-with your own tool.
+> I want an MCP server over my contract data so a budget analyst can ask
+> which contracts expire this quarter.
 
-## 5. Verify everything
+A well-behaved client will call `creator_list_library`, load the
+`mcp-server-creator` skill, and start asking discovery questions before
+writing anything. If it jumps straight to code, say "run discovery first".
+
+To drive it by hand:
+
+```
+creator_list_library
+creator_load_document(name="mcp-server-creator")
+creator_check_environment(environment="gov_il5")
+creator_start_design(purpose="...", primary_user="...", jobs_to_be_done=[...])
+  -> design_id="dsn_1a2b3c4d"
+creator_add_data_source(design_id="dsn_1a2b3c4d", name="contracts", ...)
+creator_design_tools(design_id="dsn_1a2b3c4d")
+creator_review_server(design_id="dsn_1a2b3c4d")
+creator_generate_project(design_id="dsn_1a2b3c4d")
+```
+
+`creator_start_design` returns a twelve-character `design_id`, and every
+later call takes that handle. MCP has no sessions, so the server holds the
+document and the model repeats the handle, rather than re-emitting 17 KB of
+JSON on every call.
+
+If you would rather hold the document yourself, or the server runs several
+replicas with the in-memory store, pass `spec_json` instead: every
+design-consuming tool accepts either.
+
+## 6. Get the files
+
+`creator_generate_project` returns a file index, not every file body, because
+a full project runs to hundreds of kilobytes.
+
+- Ask for specific files with `include_contents=["src/pkg/tools/x.py"]`.
+- Or have your client write the files itself from the manifest.
+- Or enable writing: set `CREATOR_ALLOW_WRITE=true` and
+  `CREATOR_OUTPUT_ROOT=/some/dir` in `.env`, then call
+  `creator_write_project` (it dry-runs first).
+
+## 7. Verify
 
 ```bash
 uv sync --group dev
-uv run pytest tests/ -v      # tests pass
-uv run ruff check .          # lint clean
+uv run pytest tests/ -v      # includes a generate-and-check round trip
+uv run ruff check .
 ```
 
-## 6. Test HTTP mode (optional)
-
-Cloud hosts run the server over HTTP. Try it locally:
+## 8. Deploy
 
 ```bash
-MCP_TRANSPORT=streamable-http uv run python main.py
-# in another terminal:
-curl http://localhost:8000/health      # {"status":"healthy",...}
+cp deploy/databricks/.env.example deploy/databricks/.env
+# edit APP_NAME and DATABRICKS_HOST
+set -a; source deploy/databricks/.env; set +a
+bash deploy/databricks/deploy-databricks-app.sh
 ```
 
----
+See [deploy/databricks/README.md](deploy/databricks/README.md) for the full
+runbook, and apply the grants: the app runs as its own service principal, not
+as you.
 
-## Next steps
+## 9. Optional: live data profiling
 
-- **Add a real tool** — follow "The one-tool-per-file pattern" in the
-  [README](README.md#the-one-tool-per-file-pattern).
-- **Rename the package** from `example_server` to your service — see the
-  [README](README.md#rename-the-package).
-- **Deploy it** — pick a kit in [deploy/README.md](deploy/README.md)
-  (IBM watsonx Orchestrate or Databricks).
-- **Evaluate it** — build an eval harness with the `mcp-eval` skill; see
-  [eval/README.md](eval/README.md).
+With `DATABRICKS_HOST`, `DATABRICKS_WAREHOUSE_ID`, and a credential in
+`.env`, `creator_profile_data_source` reads a real table's schema, row count,
+and distinct values instead of parsing a pasted schema. Everything works
+without it.

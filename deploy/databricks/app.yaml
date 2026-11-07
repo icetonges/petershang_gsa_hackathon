@@ -1,28 +1,38 @@
-# Databricks Apps deployment configuration for an MCP server.
-# https://docs.databricks.com/aws/en/dev-tools/databricks-apps/app-runtime
+# Databricks Apps runtime configuration for mcp-server-creator.
 #
-# Deploy with the kit script (which syncs this repo to your workspace and runs
-# `databricks apps deploy`):
+# `command` is a sequence and is NOT run through a shell, so environment
+# variables are not expanded in it. The one exception is DATABRICKS_APP_PORT,
+# which the platform substitutes at runtime. Because this project uses a src/
+# layout, a shell is invoked explicitly to put the package on the path.
+#
+# Deploy with the kit script, which stages this file at the repository root
+# (where Databricks reads it from the deployed source) and syncs:
 #   bash deploy/databricks/deploy-databricks-app.sh
 #
-# The MCP endpoint is available at:
-#   https://<app-url>/mcp    (Streamable HTTP, stateless)
+# Endpoints once deployed:
+#   https://<app-url>/mcp       Streamable HTTP, stateless
 #   https://<app-url>/health
+#   https://<app-url>/version
 #
-# Databricks automatically injects at runtime:
-#   DATABRICKS_APP_PORT      (defaults to 8000) — app.py serves HTTP on this
-#   DATABRICKS_HOST          workspace URL
-#   DATABRICKS_CLIENT_ID     service principal client ID
-#   DATABRICKS_CLIENT_SECRET OAuth secret
-#
-# The `command` runs the server from the synced source. We put the package's
-# src/ on PYTHONPATH and launch it as a module; app.py sees DATABRICKS_APP_PORT
-# and automatically serves streamable-HTTP on that port with /mcp and /health.
-#
-# If you renamed the `example_server` package, update the module path below.
+# Databricks injects at runtime: DATABRICKS_APP_PORT (default 8000),
+# DATABRICKS_HOST, DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET.
 command:
-  [
-    "/bin/sh",
-    "-c",
-    "export PYTHONPATH=/app/python/source_code/src:$PYTHONPATH && python -m example_server.app",
-  ]
+  - /bin/sh
+  - -c
+  - >-
+    export PYTHONPATH=/app/python/source_code/src:$PYTHONPATH &&
+    python -m mcp_server_creator.app
+
+env:
+  # Live Unity Catalog inspection in creator_profile_data_source needs a
+  # warehouse. Bind one as an app resource named `sql_warehouse` to enable
+  # it; without it, profiling falls back to parsing a pasted schema, which
+  # is the normal path.
+  - name: DATABRICKS_WAREHOUSE_ID
+    valueFrom: sql_warehouse
+
+  # Writing generated projects to disk stays OFF in a deployed app: there is
+  # no durable local filesystem worth writing to. The client writes the
+  # files from the returned manifest instead.
+  - name: CREATOR_ALLOW_WRITE
+    value: "false"
