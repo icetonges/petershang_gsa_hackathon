@@ -17,6 +17,7 @@ EXPECTED_TOOLS = {
     "creator_review_server",
     "creator_generate_project",
     "creator_write_project",
+    "creator_deploy_server",
 }
 
 
@@ -25,7 +26,7 @@ def test_server_is_importable():
 
 
 def test_server_has_name():
-    assert mcp.name == "MCP Server Creator"
+    assert mcp.name == "MCP A Creator"
 
 
 def test_server_instructions_warn_about_untrusted_input():
@@ -74,15 +75,15 @@ async def test_every_tool_is_discoverable():
 
 
 async def test_tool_count_stays_focused():
-    """Nine: one per build phase, plus the two library tools.
+    """Ten: one per build phase, the two library tools, and deploy.
 
     The rubric's ceiling of eight is for a focused domain server that
-    answers questions. This is a toolkit that runs a seven-phase workflow,
-    so it carries one more and says so in tools/__init__.py rather than
-    pretending otherwise.
+    answers questions. This is a toolkit that runs a seven-phase workflow
+    ending in a live deployment, so it carries two more and says so here
+    rather than pretending otherwise.
     """
     tools = await mcp.list_tools()
-    assert len(tools) <= 9
+    assert len(tools) <= 10
 
 
 async def test_every_tool_documents_itself():

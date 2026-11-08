@@ -1,5 +1,5 @@
 ---
-name: mcp-server-creator
+name: mcp-a-creator
 description: Entry point for building a custom MCP server on Databricks from a user's intent and their own structured or unstructured data. Runs discovery, designs the tool surface, generates the project, builds the evaluation, and prepares deployment. Use when someone wants an MCP server of their own and routes to the specialized skills for each phase.
 ---
 

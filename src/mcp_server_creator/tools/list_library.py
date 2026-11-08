@@ -42,7 +42,7 @@ def register(mcp: FastMCP) -> None:
         return {
             "skills": skills,
             "knowledge": library.list_knowledge(),
-            "start_with": "mcp-server-creator",
+            "start_with": "mcp-a-creator",
             "phases": [
                 "1. discovery: creator_start_design",
                 "2. data profiling: creator_profile_data_source",

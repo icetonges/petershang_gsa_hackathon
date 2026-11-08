@@ -63,9 +63,10 @@ EXPERIMENT_ID = "<your-experiment-id>"
 
 # 4) The Databricks secret scope + keys holding the service-principal creds
 #    (created by setup-eval-sp.sh; defaults match that script's output).
-SECRET_SCOPE = "mcp-eval-secrets"
-SECRET_KEY_CLIENT_ID = "sp_id"
-SECRET_KEY_CLIENT_SECRET = "sp_secret"
+#    These are NAMES, not secret values (read with dbutils.secrets.get).
+SECRET_SCOPE = "mcp-eval-secrets"  # nosemgrep -- scope NAME, not a secret
+SECRET_KEY_CLIENT_ID = "sp_id"  # nosemgrep -- key NAME, not a secret
+SECRET_KEY_CLIENT_SECRET = "sp_secret"  # nosemgrep -- key NAME, not a secret
 
 # 5) The LLM judges used to score each response. Add, remove, or customize
 #    scorers here. Correctness uses each dataset row's expected_facts list.

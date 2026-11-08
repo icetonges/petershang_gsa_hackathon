@@ -8,13 +8,51 @@ warehouse by resource key, and granting the app's own service principal.
 from __future__ import annotations
 
 from mcp_server_creator.models import (
+    DataSourceProfile,
     DeploymentTarget,
     FileManifest,
     ServerSpec,
     SourceKind,
 )
 from mcp_server_creator.profiling import default_grants
-from mcp_server_creator.utils import render
+from mcp_server_creator.utils import quote_uc_name, render
+
+
+def _grant_statements(source: DataSourceProfile) -> list[str]:
+    """GRANTs for one source, with every UC name validated and quoted.
+
+    Names come from the design, which the user typed. Each part must be a
+    plain identifier and is backtick-quoted, so a crafted name cannot add a
+    statement to grants.sql. A name that fails is reported, not emitted.
+    """
+    try:
+        if source.kind is SourceKind.UC_TABLE and source.full_table_name:
+            catalog = quote_uc_name(source.catalog)
+            schema = quote_uc_name(source.catalog, source.schema_name)
+            table = quote_uc_name(source.catalog, source.schema_name, source.table)
+            return [
+                f"GRANT USE CATALOG ON CATALOG {catalog} TO `$app_sp`;",
+                f"GRANT USE SCHEMA ON SCHEMA {schema} TO `$app_sp`;",
+                f"GRANT SELECT ON TABLE {table} TO `$app_sp`;",  # nosemgrep
+            ]
+        if source.kind is SourceKind.AI_SEARCH_INDEX and source.index_name:
+            index = quote_uc_name(*source.index_name.split("."))
+            return [
+                f"GRANT SELECT ON TABLE {index} TO `$app_sp`;",  # nosemgrep
+                "-- Also grant SELECT on the Delta table behind the index.",
+            ]
+        if source.kind is SourceKind.UC_FUNCTION and source.function_name:
+            function = quote_uc_name(
+                source.catalog, source.schema_name, source.function_name
+            )
+            return [f"GRANT EXECUTE ON FUNCTION {function} TO `$app_sp`;"]
+    except ValueError:
+        return [
+            "-- Skipped: this source's name is not a plain Unity Catalog",
+            "-- identifier, so no GRANT was generated. Grant access by hand.",
+        ]
+    return []
+
 
 APP_YAML = """# Databricks Apps runtime configuration.
 #
@@ -24,11 +62,22 @@ APP_YAML = """# Databricks Apps runtime configuration.
 # layout, a shell is invoked explicitly to put the package on the path.
 #
 # The MCP endpoint is https://<app-hostname>/mcp, with health at /health.
+#
+# Self-heal: the app's .venv persists across deployments, and pip leaves
+# stray files behind when FastMCP changes major version (a 4.x package
+# directory can shadow a 2.x module of the same name). If `import fastmcp`
+# fails, the fastmcp and mcp packages are wiped and reinstalled before start.
 command:
   - /bin/sh
   - -c
   - >-
     export PYTHONPATH=/app/python/source_code/src:$PYTHONPATH &&
+    { python -c "import fastmcp" >/dev/null 2>&1 || {
+    SP=$(python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])");
+    echo "Stale fastmcp or mcp files in $SP, reinstalling";
+    rm -rf "$SP/fastmcp" "$SP/mcp";
+    python -m pip install --no-cache-dir --force-reinstall --no-deps
+    "fastmcp>=2.14,<3" "mcp>=1.24,<2"; }; } &&
     python -m {{package}}.app
 {{env_block}}"""
 
@@ -268,24 +317,12 @@ def grants_sql(spec: ServerSpec) -> str:
     seen: set[str] = set()
     for source in spec.data_sources:
         lines.append(f"-- {source.name} ({source.kind.value})")
-        if source.kind is SourceKind.UC_TABLE and source.full_table_name:
-            statements = [
-                f"GRANT USE CATALOG ON CATALOG {source.catalog} TO `$app_sp`;",
-                "GRANT USE SCHEMA ON SCHEMA "
-                f"{source.catalog}.{source.schema_name} TO `$app_sp`;",
-                f"GRANT SELECT ON TABLE {source.full_table_name} TO `$app_sp`;",
-            ]
-        elif source.kind is SourceKind.AI_SEARCH_INDEX and source.index_name:
-            statements = [
-                f"GRANT SELECT ON TABLE {source.index_name} TO `$app_sp`;",
-                "-- Also grant SELECT on the Delta table behind the index.",
-            ]
-        elif source.kind is SourceKind.UC_FUNCTION and source.function_name:
-            statements = [
-                "GRANT EXECUTE ON FUNCTION "
-                f"{source.catalog}.{source.schema_name}."
-                f"{source.function_name} TO `$app_sp`;",
-            ]
+        if (
+            (source.kind is SourceKind.UC_TABLE and source.full_table_name)
+            or (source.kind is SourceKind.AI_SEARCH_INDEX and source.index_name)
+            or (source.kind is SourceKind.UC_FUNCTION and source.function_name)
+        ):
+            statements = _grant_statements(source)
         elif source.kind is SourceKind.UC_VOLUME_FILES:
             statements = [
                 "-- GRANT READ VOLUME ON VOLUME <volume> TO `$app_sp`;",

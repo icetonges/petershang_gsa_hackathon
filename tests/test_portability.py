@@ -124,6 +124,7 @@ async def test_every_design_tool_accepts_both_a_handle_and_inline_json():
         "creator_review_server",
         "creator_generate_project",
         "creator_write_project",
+        "creator_deploy_server",
     ]
     for name in design_consuming:
         properties = (tools[name].get("properties") or {}).keys()

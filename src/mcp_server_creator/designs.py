@@ -11,7 +11,10 @@ Two backends, because the right one depends on the environment:
   memory  Fast, zero setup, and correct only when one replica serves every
           request. Databricks Apps supports horizontal scaling, so this is a
           development default, not a deployment one.
-  file    A directory every replica can read, such as a mounted volume.
+  file    A local directory every replica can read.
+  volume  A Unity Catalog volume, through the Files API. The deployment
+          default on Databricks Apps, which does not mount /Volumes:
+          CREATOR_DESIGN_STORE=volume, CREATOR_DESIGN_DIR=/Volumes/c/s/v/designs
 
 `spec_json` is always accepted as an alternative to a handle, so a stateless
 deployment and a client that would rather hold the document itself both work
@@ -28,6 +31,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from mcp_server_creator import volume_files
 from mcp_server_creator.config import settings
 from mcp_server_creator.models import ServerSpec
 from mcp_server_creator.utils import UnsafePathError, safe_output_path
@@ -37,6 +41,11 @@ HANDLE_BYTES = 4
 MAX_MEMORY_DESIGNS = 256
 
 _MEMORY: dict[str, tuple[float, dict[str, Any]]] = {}
+
+# The last volume failure, if any. A failed volume write never fails the
+# tool call: the design falls back to this replica's memory, and the caller
+# still holds the full spec it can pass as spec_json.
+last_volume_error: str = ""
 
 
 class DesignError(LookupError):
@@ -49,16 +58,39 @@ def new_handle() -> str:
 
 
 def store_mode() -> str:
-    """Which backend is active: 'memory' or 'file'."""
+    """Which backend is active: 'memory', 'file' or 'volume'.
+
+    'volume' is chosen explicitly rather than inferred from whether the path
+    happens to be mounted, so the backend never flips between calls.
+    """
     configured = (settings.creator_design_store or "memory").strip().lower()
-    if configured == "file" and settings.creator_design_dir:
+    directory = (settings.creator_design_dir or "").strip()
+    if configured == "volume" and volume_files.is_volume_path(directory):
+        return "volume"
+    if configured == "file" and directory:
         return "file"
     return "memory"
 
 
 def is_durable() -> bool:
     """True when every replica of this server can read the same designs."""
-    return store_mode() == "file"
+    return store_mode() in {"file", "volume"}
+
+
+def _check_handle(handle: str) -> None:
+    if (
+        not handle.startswith(HANDLE_PREFIX)
+        or not handle[len(HANDLE_PREFIX) :].isalnum()
+    ):
+        raise DesignError(f"'{handle}' is not a design handle")
+
+
+def _volume_path(handle: str) -> str:
+    _check_handle(handle)
+    try:
+        return volume_files.join(settings.creator_design_dir, f"{handle}.json")
+    except volume_files.VolumeError as error:
+        raise DesignError(str(error)) from None
 
 
 def _file_path(handle: str) -> Path:
@@ -67,11 +99,7 @@ def _file_path(handle: str) -> Path:
     Raises:
         DesignError: on a malformed handle or an unusable directory.
     """
-    if (
-        not handle.startswith(HANDLE_PREFIX)
-        or not handle[len(HANDLE_PREFIX) :].isalnum()
-    ):
-        raise DesignError(f"'{handle}' is not a design handle")
+    _check_handle(handle)
     try:
         return safe_output_path(settings.creator_design_dir, f"{handle}.json")
     except UnsafePathError as error:
@@ -80,9 +108,19 @@ def _file_path(handle: str) -> Path:
 
 def save(spec: ServerSpec, handle: str | None = None) -> str:
     """Store a specification and return its handle."""
+    global last_volume_error
     handle = handle or new_handle()
     document = spec.model_dump(mode="json")
-    if store_mode() == "file":
+    mode = store_mode()
+    if mode == "volume":
+        try:
+            volume_files.write_text(_volume_path(handle), json.dumps(document))
+            last_volume_error = ""
+            return handle
+        except volume_files.VolumeError as error:
+            # Fall through to memory; the spec in the response stays usable.
+            last_volume_error = str(error)
+    elif mode == "file":
         path = _file_path(handle)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(document, indent=2), encoding="utf-8")
@@ -101,7 +139,23 @@ def load(handle: str) -> ServerSpec:
         DesignError: if the handle is unknown or the document is invalid.
     """
     document: dict[str, Any] | None = None
-    if store_mode() == "file":
+    mode = store_mode()
+    if mode == "volume":
+        try:
+            text = volume_files.read_text(_volume_path(handle))
+        except volume_files.VolumeError:
+            text = None
+        if text is None:
+            entry = _MEMORY.get(handle)
+            document = entry[1] if entry else None
+        else:
+            try:
+                document = json.loads(text)
+            except json.JSONDecodeError:
+                raise DesignError(
+                    f"the stored design {handle} is not readable JSON"
+                ) from None
+    elif mode == "file":
         path = _file_path(handle)
         if path.is_file():
             try:
@@ -183,7 +237,7 @@ def persist(spec: ServerSpec, design_id: str | None) -> str | None:
 
 def handle_advice(multi_replica: bool) -> str:
     """Tell the caller which input to use, given the deployment reality."""
-    if store_mode() == "file":
+    if is_durable():
         return (
             "Pass design_id on every later call. Designs are stored in a "
             "directory every replica can read."
@@ -193,7 +247,8 @@ def handle_advice(multi_replica: bool) -> str:
             "This server stores designs in process while the platform may "
             "run several replicas, so a handle can miss. Keep the returned "
             "spec and pass it as spec_json, or configure "
-            "CREATOR_DESIGN_STORE=file with CREATOR_DESIGN_DIR."
+            "CREATOR_DESIGN_STORE=volume with CREATOR_DESIGN_DIR set to a "
+            "/Volumes/... directory."
         )
     return (
         "Pass design_id on every later call. Designs are held in memory, so "
@@ -204,6 +259,11 @@ def handle_advice(multi_replica: bool) -> str:
 
 def forget(handle: str) -> bool:
     """Drop one stored design. Returns whether anything was removed."""
+    if store_mode() == "volume":
+        try:
+            return volume_files.delete(_volume_path(handle))
+        except volume_files.VolumeError as error:
+            raise DesignError(str(error)) from None
     if store_mode() == "file":
         path = _file_path(handle)
         if path.is_file():
@@ -215,6 +275,12 @@ def forget(handle: str) -> bool:
 
 def count() -> int:
     """How many designs are currently stored."""
+    if store_mode() == "volume":
+        try:
+            names = volume_files.list_names(settings.creator_design_dir)
+        except volume_files.VolumeError:
+            return 0
+        return sum(1 for name in names if name.startswith(HANDLE_PREFIX))
     if store_mode() == "file":
         directory = Path(settings.creator_design_dir)
         return len(list(directory.glob("dsn_*.json"))) if directory.is_dir() else 0

@@ -7,7 +7,10 @@ and the one most likely to break a generator.
 
 from __future__ import annotations
 
+import os
+
 import pytest
+from fastmcp import FastMCP
 
 from mcp_server_creator.models import (
     DataClassification,
@@ -20,6 +23,29 @@ from mcp_server_creator.models import (
     ServerSpec,
     SourceKind,
 )
+
+# Tests must never log real traces. mlflow.set_experiment() exports
+# MLFLOW_EXPERIMENT_ID, so a test run started from a notebook would otherwise
+# send every tool call to that experiment.
+os.environ.pop("MLFLOW_EXPERIMENT_ID", None)
+
+# FastMCP 3 and later expose list_tools() and list_prompts(), returning lists.
+# FastMCP 2.x (pinned for Databricks Genie Code compatibility) exposes
+# get_tools() and get_prompts(), returning dicts keyed by name. The tests use
+# the newer names, so add them when the installed FastMCP is 2.x.
+if not hasattr(FastMCP, "list_tools"):
+
+    async def _list_tools(self):
+        return list((await self.get_tools()).values())
+
+    FastMCP.list_tools = _list_tools
+
+if not hasattr(FastMCP, "list_prompts"):
+
+    async def _list_prompts(self):
+        return list((await self.get_prompts()).values())
+
+    FastMCP.list_prompts = _list_prompts
 
 
 @pytest.fixture

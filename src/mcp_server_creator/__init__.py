@@ -1,4 +1,4 @@
-"""MCP Server Creator.
+"""MCP A Creator.
 
 An MCP server whose domain is building MCP servers. It takes a person's
 intent and their own data, structured or unstructured, and produces a

@@ -82,6 +82,7 @@ async def test_exactly_the_mutating_tools_are_marked_mutating():
         "creator_add_data_source",
         "creator_design_tools",
         "creator_write_project",
+        "creator_deploy_server",
     }, sorted(mutating)
 
 

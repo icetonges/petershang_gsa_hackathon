@@ -28,6 +28,7 @@ from mcp_server_creator.models import (
 from mcp_server_creator.profiling import (
     default_grants,
     describe_document_corpus,
+    looks_like_pii,
     parse_tabular_text,
     profile_summary,
     validate_source_coordinates,
@@ -232,6 +233,10 @@ def register(mcp: FastMCP) -> None:
                 ),
             }
 
+        for field in fields:
+            if looks_like_pii(field.name):
+                field.pii = True
+
         retrieval = None
         if modality is DataModality.UNSTRUCTURED or kind is SourceKind.AI_SEARCH_INDEX:
             retrieval = RetrievalProfile(
@@ -277,6 +282,8 @@ def register(mcp: FastMCP) -> None:
 
         spec.data_sources = [s for s in spec.data_sources if s.name != profile.name]
         spec.data_sources.append(profile)
+        if any(field.pii for field in profile.fields):
+            spec.pii_present = True
         designs.persist(spec, design_id)
 
         summary = profile_summary(profile.fields)

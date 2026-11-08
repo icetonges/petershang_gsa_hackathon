@@ -10,7 +10,7 @@
 #
 # Rename the app and route to something unique to you before pushing.
 applications:
-  - name: mcp-server-creator
+  - name: mcp-a-creator
     buildpacks:
       - python_buildpack
     command: PYTHONPATH=src python -m mcp_server_creator.app
@@ -19,6 +19,6 @@ applications:
     env:
       PYTHONUNBUFFERED: 1
     routes:
-      - route: mcp-server-creator.app.cloud.gov
+      - route: mcp-a-creator.app.cloud.gov
     disk_quota: 1G
     memory: 256M

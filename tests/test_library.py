@@ -7,7 +7,7 @@ import pytest
 from mcp_server_creator import library
 
 EXPECTED_SKILLS = {
-    "mcp-server-creator",
+    "mcp-a-creator",
     "mcp-tool-design",
     "structured-data-mcp",
     "unstructured-data-mcp",

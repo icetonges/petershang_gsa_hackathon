@@ -9,6 +9,7 @@ silently returns nothing.
 
 from __future__ import annotations
 
+import json
 import textwrap
 
 from mcp_server_creator.models import (
@@ -142,9 +143,61 @@ def _pick(
     return candidates[0] if candidates else None
 
 
+def _plan_measure(plan: ToolPlan, source: DataSourceProfile) -> FieldProfile | None:
+    """The measure this tool aggregates; None when it counts records."""
+    if plan.measure_field:
+        return _pick(source, FieldRole.MEASURE, plan.measure_field)
+    if plan.aggregation == "count":
+        return None
+    return _pick(source, FieldRole.MEASURE)
+
+
+def _plan_group(plan: ToolPlan, source: DataSourceProfile) -> FieldProfile | None:
+    """The field a rank tool groups by: the planned one, else a dimension."""
+    if plan.group_field:
+        for field in source.fields:
+            if field.name == plan.group_field and not field.pii:
+                return field
+    return _pick(source, FieldRole.DIMENSION)
+
+
+def _visible_fields(source: DataSourceProfile) -> list[str]:
+    """Fields a tool may return: everything except personal information."""
+    return [f.name for f in source.fields if not f.pii]
+
+
+def _list_literal(values: list[str], indent: str) -> list[str]:
+    """A multi-line list literal, one quoted value per line."""
+    return [*(f"{indent}    {_lit(v)}," for v in values), f"{indent}]"]
+
+
+def _select_list(source: DataSourceProfile) -> list[str]:
+    """Lines binding `select_list` to the non-personal columns, or nothing."""
+    if len(_visible_fields(source)) == len(source.fields):
+        return []
+    return [
+        '            select_list = ", ".join(',
+        "                column(name, COLUMNS)",
+        "                for name in [",
+        *_list_literal(_visible_fields(source), "                    "),
+        "            )",
+    ]
+
+
 def _first_field_name(source: DataSourceProfile, fallback: str = "id") -> str:
     """Name of the first field, or a fallback when the profile is empty."""
     return source.fields[0].name if source.fields else fallback
+
+
+def _lit(value: object) -> str:
+    """Render a profiled name or value as a safe Python string literal.
+
+    Field names and defaults come from data the user supplied, so they are
+    never pasted between quotes by hand: a name holding a quote or a newline
+    would otherwise inject code into the generated module. json.dumps always
+    yields a valid, double-quoted Python literal for a str.
+    """
+    return json.dumps(str(value))
 
 
 def _string_literal(text: str, indent: str, width: int = 0) -> list[str]:
@@ -208,7 +261,7 @@ def _param_lines(spec: ServerSpec, plan: ToolPlan) -> list[str]:
                 member = to_identifier(default).upper()
                 rendered_default = f" = {annotation}.{member}"
             elif isinstance(default, str):
-                rendered_default = f' = "{default}"'
+                rendered_default = f" = {_lit(default)}"
             else:
                 rendered_default = f" = {default!r}"
 
@@ -463,7 +516,9 @@ def _filter_normalization(
 def _filter_dict_literal(plan: ToolPlan) -> str:
     """Render a dict literal of active field filters, as plain strings."""
     pairs = [
-        f'"{param.source_field}": filter_{param.name}' for param in _filter_params(plan)
+        f"{_lit(param.source_field)}: filter_{param.name}"
+        for param in _filter_params(plan)
+        if param.operator == "="
     ]
     return "{" + ", ".join(pairs) + "}"
 
@@ -479,11 +534,14 @@ def _sql_where(plan: ToolPlan, source: DataSourceProfile) -> list[str]:
         field = param.source_field
         if field not in known:
             continue
-        column_expression = "f\"{column('" + field + "', COLUMNS)} = ?\""
+        # _lit() makes the column name a Python literal, so a crafted field
+        # name cannot inject code into the generated module. At run time
+        # column() checks it against the allowlist and backtick-quotes it;
+        # the filter value is always a bound parameter.
         lines += [
             f"        if filter_{param.name}:",
             "            clauses.append(",
-            f"                {column_expression}",
+            f'                column({_lit(field)}, COLUMNS) + " {param.operator} ?"',
             "            )",
             f"            params.append(filter_{param.name})",
         ]
@@ -500,10 +558,15 @@ def _body_sql_lookup(plan: ToolPlan, source: DataSourceProfile) -> list[str]:
     param = plan.params[0].name if plan.params else "record_id"
     return [
         "        try:",
-        f'            key_column = column("{key}", COLUMNS)',
+        f"            key_column = column({_lit(key)}, COLUMNS)",
+        *_select_list(source),
         "            sql = (",
-        '                f"SELECT * FROM {TABLE} "',
-        '                f"WHERE {key_column} = ? LIMIT 1"',
+        (
+            '                f"SELECT {select_list} FROM {TABLE} "  # nosemgrep # nosec B608'
+            if _select_list(source)
+            else '                f"SELECT * FROM {TABLE} "  # nosemgrep # nosec B608'
+        ),
+        '                f"WHERE {key_column} = ? LIMIT 1"  # nosemgrep',
         "            )",
         f"            rows = run_query(sql, [{param}])",
         *_error_guard(source, "Check the identifier format and try again."),
@@ -519,7 +582,7 @@ def _body_sql_lookup(plan: ToolPlan, source: DataSourceProfile) -> list[str]:
         "        return {",
         '            "as_of": AS_OF,',
         '            "record": rows[0],',
-        f'            "fields_used": ["{key}"],',
+        f'            "fields_used": [{_lit(key)}],',
         "        }",
     ]
 
@@ -541,16 +604,24 @@ def _body_sql_search(plan: ToolPlan, source: DataSourceProfile) -> list[str]:
         "            ]",
         '            search_clause = "(" + " OR ".join(likes) + ")"',
         "            if where:",
-        '                joined = f"{where} AND {search_clause}"',
+        '                joined = f"{where} AND {search_clause}"  # nosemgrep',
         "            else:",
-        '                joined = f" WHERE {search_clause}"',
+        '                joined = f" WHERE {search_clause}"  # nosemgrep',
         "            bound = list(params) + [probe] * len(text_columns)",
         "            totals = run_query(",
-        '                f"SELECT COUNT(*) AS total FROM {TABLE}{joined}", bound',
+        '                "SELECT COUNT(*) AS total "  # nosemgrep # nosec B608',
+        '                f"FROM {TABLE}{joined}",',
+        "                bound,",
         "            )",
         '            total = int(totals[0]["total"]) if totals else 0',
+        *_select_list(source),
         "            rows = run_query(",
-        '                f"SELECT * FROM {TABLE}{joined} LIMIT ? OFFSET ?",',
+        (
+            '                f"SELECT {select_list} FROM {TABLE}{joined} "  # nosemgrep # nosec B608'
+            if _select_list(source)
+            else '                f"SELECT * FROM {TABLE}{joined} "  # nosemgrep # nosec B608'
+        ),
+        '                "LIMIT ? OFFSET ?",',
         "                bound + [limit, offset],",
         "            )",
         *_error_guard(source, "Try a shorter query, or drop a filter."),
@@ -570,18 +641,29 @@ def _body_sql_search(plan: ToolPlan, source: DataSourceProfile) -> list[str]:
 
 def _body_sql_rank(plan: ToolPlan, source: DataSourceProfile) -> list[str]:
     """Top groups by a measure, with each group's share of the whole."""
-    measure = _pick(source, FieldRole.MEASURE)
-    dimension = _pick(source, FieldRole.DIMENSION)
+    measure = _plan_measure(plan, source)
+    dimension = _plan_group(plan, source)
     measure_name = measure.name if measure else ""
     group_name = dimension.name if dimension else _first_field_name(source)
+    if not measure_name:
+        agg = "COUNT(*)"
+    elif plan.aggregation == "avg":
+        agg = "AVG({measure_column})"
+    else:
+        agg = "SUM({measure_column})"
+    measure_line = (
+        [f"            measure_column = column({_lit(measure_name)}, COLUMNS)"]
+        if measure_name
+        else []
+    )
     return [
         *_sql_where(plan, source),
         "        try:",
-        f'            group_column = column("{group_name}", COLUMNS)',
-        f'            measure_column = column("{measure_name}", COLUMNS)',
+        f"            group_column = column({_lit(group_name)}, COLUMNS)",
+        *measure_line,
         "            sql = (",
-        '                f"SELECT {group_column} AS group_value, "',
-        '                f"SUM({measure_column}) AS measure_total, "',
+        '                f"SELECT {group_column} AS group_value, "  # nosemgrep # nosec B608',
+        f'                f"{agg} AS measure_total, "',
         '                f"COUNT(*) AS record_count "',
         '                f"FROM {TABLE}{where} "',
         '                f"GROUP BY {group_column} "',
@@ -589,7 +671,8 @@ def _body_sql_rank(plan: ToolPlan, source: DataSourceProfile) -> list[str]:
         "            )",
         "            rows = run_query(sql, list(params) + [limit])",
         "            overall = run_query(",
-        '                f"SELECT SUM({measure_column}) AS measure_total, "',
+        f'                f"SELECT {agg} "  # nosemgrep # nosec B608',
+        '                "AS measure_total, "',
         '                f"COUNT(*) AS record_count, "',
         '                f"COUNT(DISTINCT {group_column}) AS group_count "',
         '                f"FROM {TABLE}{where}",',
@@ -597,7 +680,11 @@ def _body_sql_rank(plan: ToolPlan, source: DataSourceProfile) -> list[str]:
         "            )",
         *_error_guard(source, "Drop a filter, or widen the period."),
         "        population = overall[0] if overall else {}",
-        '        grand_total = float(population.get("measure_total") or 0)',
+        (
+            "        grand_total = 0.0  # shares of an average are meaningless"
+            if plan.aggregation == "avg" and measure_name
+            else '        grand_total = float(population.get("measure_total") or 0)'
+        ),
         "        for row in rows:",
         '            value = float(row.get("measure_total") or 0)',
         '            row["share_of_total"] = (',
@@ -605,8 +692,9 @@ def _body_sql_rank(plan: ToolPlan, source: DataSourceProfile) -> list[str]:
         "            )",
         "        return {",
         '            "as_of": AS_OF,',
-        f'            "ranked_by": "{measure_name}",',
-        f'            "grouped_by": "{group_name}",',
+        f'            "ranked_by": {_lit(measure_name or "record count")},',
+        f'            "aggregation": {_lit(plan.aggregation if measure_name else "count")},',
+        f'            "grouped_by": {_lit(group_name)},',
         '            "items": rows,',
         '            "population": population,',
         "        }",
@@ -615,14 +703,14 @@ def _body_sql_rank(plan: ToolPlan, source: DataSourceProfile) -> list[str]:
 
 def _body_sql_aggregate(plan: ToolPlan, source: DataSourceProfile) -> list[str]:
     """One summary row for the filtered scope."""
-    measure = _pick(source, FieldRole.MEASURE)
+    measure = _plan_measure(plan, source)
     measure_name = measure.name if measure else ""
     lines = [*_sql_where(plan, source), "        try:"]
     if measure_name:
         lines += [
-            f'            measure_column = column("{measure_name}", COLUMNS)',
+            f"            measure_column = column({_lit(measure_name)}, COLUMNS)",
             "            sql = (",
-            '                f"SELECT COUNT(*) AS record_count, "',
+            '                f"SELECT COUNT(*) AS record_count, "  # nosemgrep # nosec B608',
             '                f"SUM({measure_column}) AS measure_total, "',
             '                f"AVG({measure_column}) AS measure_mean, "',
             '                f"MIN({measure_column}) AS measure_min, "',
@@ -633,7 +721,8 @@ def _body_sql_aggregate(plan: ToolPlan, source: DataSourceProfile) -> list[str]:
     else:
         lines += [
             "            sql = (",
-            '                f"SELECT COUNT(*) AS record_count FROM {TABLE}{where}"',
+            '                "SELECT COUNT(*) AS record_count "  # nosemgrep # nosec B608',
+            '                f"FROM {TABLE}{where}"',
             "            )",
         ]
     lines += [
@@ -641,7 +730,7 @@ def _body_sql_aggregate(plan: ToolPlan, source: DataSourceProfile) -> list[str]:
         *_error_guard(source, "Drop a filter, or check the period."),
         "        return {",
         '            "as_of": AS_OF,',
-        f'            "measure": "{measure_name}",',
+        f'            "measure": {_lit(measure_name)},',
         '            "totals": rows[0] if rows else {},',
         '            "filters_applied": len(clauses),',
         "        }",
@@ -650,22 +739,28 @@ def _body_sql_aggregate(plan: ToolPlan, source: DataSourceProfile) -> list[str]:
 
 
 def _body_sql_trend(plan: ToolPlan, source: DataSourceProfile) -> list[str]:
-    """A measure by month, with change against the prior period."""
-    measure = _pick(source, FieldRole.MEASURE)
-    date_field = _pick(source, FieldRole.DATE)
+    """A measure by period, with change against the prior period."""
+    measure = _plan_measure(plan, source)
+    date_field = _pick(source, FieldRole.DATE, plan.date_field)
+    grain = plan.granularity.upper()
     measure_name = measure.name if measure else ""
     date_name = date_field.name if date_field else ""
     lines = [*_sql_where(plan, source), "        try:"]
-    lines.append(f'            date_column = column("{date_name}", COLUMNS)')
+    lines.append(f"            date_column = column({_lit(date_name)}, COLUMNS)")
     if measure_name:
-        lines.append(f'            measure_column = column("{measure_name}", COLUMNS)')
+        lines.append(
+            f"            measure_column = column({_lit(measure_name)}, COLUMNS)"
+        )
     lines += [
         "            sql = (",
-        "                f\"SELECT date_trunc('MONTH', {date_column}) \"",
+        f"                f\"SELECT date_trunc('{grain}', {{date_column}}) \"  # nosemgrep # nosec B608",
         '                f"AS period, "',
     ]
     if measure_name:
-        lines.append('                f"SUM({measure_column}) AS measure_total, "')
+        agg_fn = "AVG" if plan.aggregation == "avg" else "SUM"
+        lines.append(
+            f'                f"{agg_fn}({{measure_column}}) AS measure_total, "'
+        )
     lines += [
         '                f"COUNT(*) AS record_count "',
         '                f"FROM {TABLE}{where} "',
@@ -692,9 +787,9 @@ def _body_sql_trend(plan: ToolPlan, source: DataSourceProfile) -> list[str]:
         "            previous = current",
         "        return {",
         '            "as_of": AS_OF,',
-        f'            "date_field": "{date_name}",',
-        f'            "measure": "{measure_name}",',
-        '            "granularity": "month",',
+        f'            "date_field": {_lit(date_name)},',
+        f'            "measure": {_lit(measure_name)},',
+        f'            "granularity": {_lit(plan.granularity)},',
         '            "periods": rows,',
         "        }",
     ]
@@ -712,15 +807,15 @@ def _body_sql_compare(plan: ToolPlan, source: DataSourceProfile) -> list[str]:
     right = names[1] if len(names) > 1 else "right"
     return [
         "        try:",
-        f'            group_column = column("{group_name}", COLUMNS)',
-        f'            measure_column = column("{measure_name}", COLUMNS)',
+        f"            group_column = column({_lit(group_name)}, COLUMNS)",
+        f"            measure_column = column({_lit(measure_name)}, COLUMNS)",
         f"            left_value = getattr({left}, 'value', {left})",
         f"            right_value = getattr({right}, 'value', {right})",
         "            rows = run_query(",
-        '                f"SELECT {group_column} AS group_value, "',
+        '                f"SELECT {group_column} AS group_value, "  # nosemgrep # nosec B608',
         '                f"SUM({measure_column}) AS measure_total, "',
         '                f"COUNT(*) AS record_count "',
-        '                f"FROM {TABLE} WHERE {group_column} IN (?, ?) "',
+        '                f"FROM {TABLE} WHERE {group_column} IN (?, ?) "  # nosemgrep',
         '                f"GROUP BY {group_column}",',
         "                [left_value, right_value],",
         "            )",
@@ -732,8 +827,8 @@ def _body_sql_compare(plan: ToolPlan, source: DataSourceProfile) -> list[str]:
         '        right_total = float(right_row.get("measure_total") or 0)',
         "        return {",
         '            "as_of": AS_OF,',
-        f'            "measure": "{measure_name}",',
-        f'            "dimension": "{group_name}",',
+        f'            "measure": {_lit(measure_name)},',
+        f'            "dimension": {_lit(group_name)},',
         '            "left": {"value": left_value, **left_row},',
         '            "right": {"value": right_value, **right_row},',
         '            "difference": round(left_total - right_total, 4),',
@@ -844,7 +939,7 @@ def _body_snapshot_lookup(plan: ToolPlan, source: DataSourceProfile) -> list[str
         "        found = [",
         "            row",
         "            for row in rows",
-        f'            if str(row.get("{key}", "")).strip().lower() == wanted',
+        f'            if str(row.get({_lit(key)}, "")).strip().lower() == wanted',
         "        ]",
         "        if not found:",
         "            return {",
@@ -855,10 +950,23 @@ def _body_snapshot_lookup(plan: ToolPlan, source: DataSourceProfile) -> list[str
         "                ),",
         '                "as_of": AS_OF,',
         "            }",
+        *(
+            [
+                "        hidden = {"
+                + ", ".join(_lit(n) for n in [f.name for f in source.fields if f.pii])
+                + "}",
+                "        found = [",
+                "            {k: v for k, v in row.items() if k not in hidden}",
+                "            for row in found",
+                "        ]",
+            ]
+            if any(f.pii for f in source.fields)
+            else []
+        ),
         "        return {",
         '            "as_of": AS_OF,',
         '            "record": found[0],',
-        f'            "fields_used": ["{key}"],',
+        f'            "fields_used": [{_lit(key)}],',
         "        }",
     ]
 
@@ -882,6 +990,19 @@ def _body_snapshot_search(plan: ToolPlan, source: DataSourceProfile) -> list[str
         f"            and contains(row, text_columns, {query_param})",
         "        ]",
         "        window = hits[offset : offset + limit]",
+        *(
+            [
+                "        hidden = {"
+                + ", ".join(_lit(n) for n in [f.name for f in source.fields if f.pii])
+                + "}",
+                "        window = [",
+                "            {k: v for k, v in row.items() if k not in hidden}",
+                "            for row in window",
+                "        ]",
+            ]
+            if any(f.pii for f in source.fields)
+            else []
+        ),
         "        next_offset = offset + len(window)",
         "        return {",
         '            "as_of": AS_OF,',
@@ -900,12 +1021,12 @@ def _body_snapshot_search(plan: ToolPlan, source: DataSourceProfile) -> list[str
 
 def _body_snapshot_rank(plan: ToolPlan, source: DataSourceProfile) -> list[str]:
     """Top groups by a measure over the packaged snapshot."""
-    measure = _pick(source, FieldRole.MEASURE)
-    dimension = _pick(source, FieldRole.DIMENSION)
+    measure = _plan_measure(plan, source)
+    dimension = _plan_group(plan, source)
     measure_name = measure.name if measure else ""
     group_name = dimension.name if dimension else _first_field_name(source)
     accumulate = (
-        f'            bucket["measure_total"] += to_number(row.get("{measure_name}"))'
+        f'            bucket["measure_total"] += to_number(row.get({_lit(measure_name)}))'
         if measure_name
         else '            bucket["measure_total"] += 1.0'
     )
@@ -917,7 +1038,7 @@ def _body_snapshot_rank(plan: ToolPlan, source: DataSourceProfile) -> list[str]:
         "        scoped = [row for row in rows if matches(row, active)]",
         "        buckets: dict[str, dict[str, Any]] = {}",
         "        for row in scoped:",
-        f'            key = str(row.get("{group_name}", "(missing)"))',
+        f'            key = str(row.get({_lit(group_name)}, "(missing)"))',
         "            bucket = buckets.setdefault(",
         "                key,",
         "                {",
@@ -942,8 +1063,8 @@ def _body_snapshot_rank(plan: ToolPlan, source: DataSourceProfile) -> list[str]:
         "            )",
         "        return {",
         '            "as_of": AS_OF,',
-        f'            "ranked_by": "{measure_name}",',
-        f'            "grouped_by": "{group_name}",',
+        f'            "ranked_by": {_lit(measure_name)},',
+        f'            "grouped_by": {_lit(group_name)},',
         '            "items": ranked[:limit],',
         '            "population": {',
         '                "measure_total": round(grand_total, 4),',
@@ -956,10 +1077,10 @@ def _body_snapshot_rank(plan: ToolPlan, source: DataSourceProfile) -> list[str]:
 
 def _body_snapshot_aggregate(plan: ToolPlan, source: DataSourceProfile) -> list[str]:
     """One summary row over the packaged snapshot."""
-    measure = _pick(source, FieldRole.MEASURE)
+    measure = _plan_measure(plan, source)
     measure_name = measure.name if measure else ""
     values_line = (
-        f'        values = [to_number(r.get("{measure_name}")) for r in scoped]'
+        f"        values = [to_number(r.get({_lit(measure_name)})) for r in scoped]"
         if measure_name
         else "        values: list[float] = []"
     )
@@ -972,7 +1093,7 @@ def _body_snapshot_aggregate(plan: ToolPlan, source: DataSourceProfile) -> list[
         values_line,
         "        return {",
         '            "as_of": AS_OF,',
-        f'            "measure": "{measure_name}",',
+        f'            "measure": {_lit(measure_name)},',
         '            "totals": {',
         '                "record_count": len(scoped),',
         '                "measure_total": (',
@@ -995,13 +1116,12 @@ def _body_snapshot_aggregate(plan: ToolPlan, source: DataSourceProfile) -> list[
 
 def _body_snapshot_trend(plan: ToolPlan, source: DataSourceProfile) -> list[str]:
     """A measure by month over the packaged snapshot."""
-    _ = plan
-    measure = _pick(source, FieldRole.MEASURE)
-    date_field = _pick(source, FieldRole.DATE)
+    measure = _plan_measure(plan, source)
+    date_field = _pick(source, FieldRole.DATE, plan.date_field)
     measure_name = measure.name if measure else ""
     date_name = date_field.name if date_field else ""
     accumulate = (
-        f'            bucket["measure_total"] += to_number(row.get("{measure_name}"))'
+        f'            bucket["measure_total"] += to_number(row.get({_lit(measure_name)}))'
         if measure_name
         else '            bucket["measure_total"] += 1.0'
     )
@@ -1011,7 +1131,7 @@ def _body_snapshot_trend(plan: ToolPlan, source: DataSourceProfile) -> list[str]
         *_error_guard(source, "The packaged snapshot is missing; rebuild it."),
         "        buckets: dict[str, dict[str, Any]] = {}",
         "        for row in rows:",
-        f'            raw = str(row.get("{date_name}", "")).strip()',
+        f'            raw = str(row.get({_lit(date_name)}, "")).strip()',
         '            period = raw[:7] if len(raw) >= 7 else (raw or "(missing)")',
         "            bucket = buckets.setdefault(",
         "                period,",
@@ -1042,9 +1162,9 @@ def _body_snapshot_trend(plan: ToolPlan, source: DataSourceProfile) -> list[str]
         "            previous = current",
         "        return {",
         '            "as_of": AS_OF,',
-        f'            "date_field": "{date_name}",',
-        f'            "measure": "{measure_name}",',
-        '            "granularity": "month",',
+        f'            "date_field": {_lit(date_name)},',
+        f'            "measure": {_lit(measure_name)},',
+        f'            "granularity": {_lit(plan.granularity)},',
         '            "periods": periods,',
         "        }",
     ]

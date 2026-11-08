@@ -116,6 +116,47 @@ FLAG_NAME_PREFIXES = ("is_", "has_", "flag_", "can_", "should_")
 
 MIN_SUBSTRING_HINT = 4
 
+# Personal information, matched on whole name words (camelCase or snake_case).
+PII_WORDS = {"ssn", "email", "phone", "mobile", "passport", "dob", "birthdate"}
+PII_WORD_PAIRS = (
+    ("card", "number"),
+    ("card", "num"),
+    ("card", "no"),
+    ("social", "security"),
+    ("date", "birth"),
+    ("birth", "date"),
+    ("first", "name"),
+    ("last", "name"),
+    ("full", "name"),
+    ("home", "address"),
+    ("street", "address"),
+    ("email", "address"),
+)
+
+
+def name_words(name: str) -> list[str]:
+    """Split a field name into lowercase words: 'customerID' -> customer, id."""
+    spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", name.strip())
+    spaced = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", spaced)
+    return [w for w in re.split(r"[^A-Za-z0-9]+", spaced.lower()) if w]
+
+
+def looks_like_pii(name: str) -> bool:
+    """True for card numbers, emails, phones and similar personal fields."""
+    words = name_words(name)
+    if PII_WORDS & set(words):
+        return True
+    return any(
+        first in words and second in words and words.index(first) < words.index(second)
+        for first, second in PII_WORD_PAIRS
+    )
+
+
+def _identifier_by_words(name: str) -> bool:
+    """'customerID', 'cardNumber', 'award_key': the last word names a key."""
+    words = name_words(name)
+    return bool(words) and words[-1] in IDENTIFIER_NAME_HINTS
+
 
 def _matches_hint(name: str, hints: tuple[str, ...]) -> bool:
     """Match a field name against hints without false substring hits.
@@ -167,6 +208,12 @@ def infer_role(
     if any(lower == hint or lower.endswith(f"_{hint}") for hint in GEO_NAME_HINTS):
         return FieldRole.GEO
     if base in INT_TYPES | FLOAT_TYPES:
+        # An identifier stored as a number is still an identifier: summing
+        # customerID or cardNumber produces a confident, meaningless total.
+        # Checked before the measure hints, because 'accountNumber' contains
+        # 'count' and 'priceCode' contains 'price'.
+        if _identifier_by_words(name) or looks_like_pii(name):
+            return FieldRole.IDENTIFIER
         if _matches_hint(lower, MEASURE_NAME_HINTS):
             return FieldRole.MEASURE
         if any(
@@ -178,7 +225,7 @@ def infer_role(
     if any(
         lower == hint or lower.endswith(f"_{hint}") or lower.startswith(f"{hint}_")
         for hint in IDENTIFIER_NAME_HINTS
-    ):
+    ) or _identifier_by_words(name):
         return FieldRole.IDENTIFIER
     longest = max((len(s) for s in samples), default=0)
     if longest > 120 or _matches_hint(lower, TEXT_NAME_HINTS):
@@ -551,6 +598,13 @@ def profile_summary(fields: list[FieldProfile]) -> dict[str, Any]:
         if f.enum_values or (f.cardinality_hint and f.cardinality_hint <= 50)
     ]
     observations: list[str] = []
+    pii = [f.name for f in fields if f.pii or looks_like_pii(f.name)]
+    if pii:
+        observations.append(
+            "PII-like columns: " + ", ".join(pii) + ". They are flagged as "
+            "personal information: generated tools will not return them, filter "
+            "on them or group by them. Classify the server as internal or sensitive."
+        )
     if not by_role.get("measure"):
         observations.append(
             "No measures detected, so aggregate and trend tools are not "
@@ -575,6 +629,7 @@ def profile_summary(fields: list[FieldProfile]) -> dict[str, Any]:
         "field_count": len(fields),
         "by_role": by_role,
         "enum_candidates": enum_ready,
+        "pii": pii,
         "observations": observations,
     }
 

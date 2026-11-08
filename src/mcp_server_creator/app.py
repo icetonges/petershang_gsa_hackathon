@@ -20,19 +20,42 @@ import os
 
 from fastmcp import FastMCP
 
+from mcp_server_creator import examples
 from mcp_server_creator.config import settings
 from mcp_server_creator.prompts import register_prompts
 from mcp_server_creator.resources import register_resources
 from mcp_server_creator.routes import register_routes
 from mcp_server_creator.tools import register_tools
+from mcp_server_creator.tracing import TraceMiddleware, warm_up
 
 mcp = FastMCP(
-    name="MCP Server Creator",
+    name="MCP A Creator",
     instructions=(
+        "MCP A Creator helps anyone build their own MCP server from their "
+        "data and a task they do by hand today. When a user arrives, explain "
+        "in one or two plain sentences what you can do, then guide them: you "
+        "need (1) one real user and their task, (2) three to eight questions "
+        "that person asks, in their own words, (3) where the data lives, such "
+        "as a Unity Catalog table, a volume of PDFs, or a REST API, and (4) "
+        "what the server must refuse.\n\n" + examples.instructions_text() + "\n\n"
+        "Confirm every table exists before you design around it: run "
+        "creator_add_data_source with live inspection first. If the table "
+        "is missing or unreadable, say so plainly, do not invent its "
+        "columns, and offer a samples table or ask for the right name. Keep "
+        "the conversation friendly and short: ask one question that unblocks "
+        "several decisions, say which defaults you took, and confirm the tool "
+        "list before generating.\n\n"
         "This server builds other MCP servers. Call creator_list_library "
-        "first, then load the 'mcp-server-creator' skill and follow its six "
+        "first, then load the 'mcp-a-creator' skill and follow its six "
         "phases: discovery, data profiling, tool design, generation, "
         "evaluation, deployment and review.\n\n"
+        "To make it real: creator_write_project with destination "
+        "'workspace' writes the project to the user's own folder, "
+        "/Workspace/Users/<them>/mcp-servers/<name>. If its answer has an "
+        "`approval`, ask the user that question (the default answer is "
+        "yes) before writing. Then creator_deploy_server returns a "
+        "security review and a plan: show both, ask for approval, and on "
+        "yes call it again with approve=true until `status` is live.\n\n"
         "Run discovery before writing anything. The questions that decide "
         "the design are whose job this is, what they ask today in their own "
         "words, where the data lives, who will call the server, and what it "
@@ -46,6 +69,8 @@ mcp = FastMCP(
     ),
 )
 
+mcp.add_middleware(TraceMiddleware())
+warm_up()
 register_tools(mcp)
 register_prompts(mcp)
 register_resources(mcp)
@@ -66,15 +91,35 @@ def main() -> None:
     platform_port = os.getenv("DATABRICKS_APP_PORT") or os.getenv("PORT")
 
     if platform_port:
-        # "streamable-http" is accepted by every FastMCP release that
-        # has the transport at all; "http" is a newer alias. An
-        # internal package mirror pinned to an older version would
-        # reject the alias, so use the name that always works.
-        mcp.run(
-            transport="streamable-http",
-            host="0.0.0.0",
-            port=int(platform_port),
+        # Databricks Apps / Genie Code require a STATELESS streamable-HTTP
+        # server served at /mcp, and the workspace origin must pass CORS.
+        import uvicorn
+        from starlette.middleware import Middleware
+        from starlette.middleware.cors import CORSMiddleware
+
+        host = os.getenv("DATABRICKS_HOST", "").rstrip("/")
+        if host and not host.startswith("http"):
+            host = f"https://{host}"
+        extra = [
+            o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()
+        ]
+        origins = [o for o in [host, *extra] if o]
+
+        app = mcp.http_app(
+            path="/mcp",
+            stateless_http=True,
+            middleware=[
+                Middleware(
+                    CORSMiddleware,
+                    allow_origins=origins or ["*"],
+                    allow_credentials=bool(origins),
+                    allow_methods=["*"],
+                    allow_headers=["*"],
+                    expose_headers=["mcp-session-id"],
+                )
+            ],
         )
+        uvicorn.run(app, host="0.0.0.0", port=int(platform_port))
     elif settings.mcp_transport == "streamable-http":
         mcp.run(
             transport="streamable-http",

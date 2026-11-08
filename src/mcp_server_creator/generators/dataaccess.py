@@ -587,7 +587,9 @@ def call_function(
     """
     name = qualified(catalog, schema, function)
     placeholders = ", ".join("?" for _ in args)
-    sql = f"SELECT {name}({placeholders}) AS result"
+    # `name` is validated and backtick-quoted by qualified(); arguments are
+    # bound as ? parameters, never interpolated.
+    sql = f"SELECT {name}({placeholders}) AS result"  # nosemgrep # nosec B608
     rows = run_query(sql, list(args))
     if not rows:
         raise WarehouseError("The function returned no result.")

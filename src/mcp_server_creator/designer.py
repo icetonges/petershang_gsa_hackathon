@@ -7,10 +7,13 @@ inventing a tool that would return nulls.
 
 from __future__ import annotations
 
+import re
+
 from mcp_server_creator.models import (
     DataModality,
     DataSourceProfile,
     FieldProfile,
+    FieldRole,
     ParamPlan,
     QueryPattern,
     ServerSpec,
@@ -38,6 +41,37 @@ VAGUE_TOOL_WORDS = {
 }
 
 
+# Words that say nothing about which field a question is about.
+_STOP = {
+    "the", "and", "for", "with", "what", "which", "how", "many", "much", "does",
+    "did", "are", "was", "were", "this", "that", "next", "last", "show", "give",
+    "tell", "from", "into", "over", "each", "per", "any", "all", "expect",
+    "have", "has", "get", "list", "find", "who", "when", "where", "why",
+}  # fmt: skip
+
+
+def _tokens(text: str) -> set[str]:
+    """Four-letter stems, so 'temperature' meets 'temp' and 'days' meets 'day'."""
+    words = re.findall(r"[a-z]+", text.lower().replace("_", " "))
+    return {word[:4] for word in words if len(word) >= 3 and word not in _STOP}
+
+
+def _job_tokens(spec: ServerSpec) -> set[str]:
+    return _tokens(" ".join(spec.jobs_to_be_done))
+
+
+def _relevance(field: FieldProfile, wanted: set[str]) -> int:
+    return len(_tokens(f"{field.name} {field.description}") & wanted)
+
+
+def _rank(fields: list[FieldProfile], spec: ServerSpec) -> list[FieldProfile]:
+    """Fields the user's questions mention first; otherwise the profiled order."""
+    wanted = _job_tokens(spec)
+    if not wanted:
+        return list(fields)
+    return sorted(fields, key=lambda field: -_relevance(field, wanted))
+
+
 def _tool_name(prefix: str, *parts: str) -> str:
     """Build a prefixed snake_case tool name within the length limit."""
     pieces = [to_identifier(prefix)] + [to_identifier(p) for p in parts if p]
@@ -48,21 +82,28 @@ def _tool_name(prefix: str, *parts: str) -> str:
     return trimmed or f"{to_identifier(prefix)}_tool"
 
 
-def _enum_candidates(source: DataSourceProfile, limit: int = 2) -> list[FieldProfile]:
+def _enum_candidates(
+    source: DataSourceProfile, limit: int = 2, spec: ServerSpec | None = None
+) -> list[FieldProfile]:
     """Dimension fields narrow enough to expose as enums."""
+    dimensions = [f for f in source.dimensions() if not f.pii]
+    if spec is not None:
+        dimensions = _rank(dimensions, spec)
     candidates = [
         field
-        for field in source.dimensions()
+        for field in dimensions
         if field.enum_values
         or (field.cardinality_hint is not None and field.cardinality_hint <= 50)
     ]
     return candidates[:limit]
 
 
-def _filter_params(source: DataSourceProfile, limit: int = 2) -> list[ParamPlan]:
+def _filter_params(
+    source: DataSourceProfile, limit: int = 2, spec: ServerSpec | None = None
+) -> list[ParamPlan]:
     """Optional filter parameters, as enums where the data allows."""
     params: list[ParamPlan] = []
-    for field in _enum_candidates(source, limit):
+    for field in _enum_candidates(source, limit, spec):
         description = (
             field.description
             or f"Narrow results to one {field.name.replace('_', ' ')}."
@@ -139,15 +180,343 @@ def _describe_tool(spec: ServerSpec, source: DataSourceProfile) -> ToolPlan:
     )
 
 
+# ---------------------------------------------------------------------------
+# Tools derived from the user's own questions.
+#
+# A generic "totals" tool that sums the first numeric column answers none of
+# "revenue by franchise last month" or "average fare by pickup zip". Each
+# recorded job is parsed for its measure, aggregation, grouping, entity filter,
+# date range and time grain, and becomes one tool that answers it as asked.
+# ---------------------------------------------------------------------------
+
+_MEASURE_SYNONYMS: dict[str, tuple[str, ...]] = {
+    "revenue": ("price", "amount", "revenue", "sales", "total", "spend"),
+    "sales": ("price", "amount", "revenue", "sales", "total"),
+    "income": ("price", "amount", "revenue", "income", "total"),
+    "spend": ("amount", "cost", "spend", "price", "total"),
+    "spending": ("amount", "cost", "spend", "price", "total"),
+    "cost": ("cost", "amount", "price", "spend"),
+    "units": ("quantity", "qty", "units"),
+    "unit": ("quantity", "qty", "units"),
+    "sold": ("quantity", "qty", "units"),
+    "volume": ("quantity", "qty", "volume"),
+    "fare": ("fare",),
+    "fares": ("fare",),
+}
+_AVG_CUES = ("average", "avg", "mean", "typical")
+_COUNT_CUES = (
+    "how many",
+    "number of",
+    "count of",
+    "use most",
+    "most often",
+    "most common",
+)
+_RANGE_CUES = re.compile(
+    r"\b(between|since|from \S+ to|date range|yesterday|today|"
+    r"(last|this|past|previous|current) (day|week|month|quarter|year))\b"
+)
+_GRAIN_CUES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("day", ("daily", "per day", "each day", "by day", "day by day")),
+    ("week", ("weekly", "per week", "each week", "by week", "week by week")),
+    (
+        "month",
+        (
+            "monthly",
+            "per month",
+            "each month",
+            "by month",
+            "month by month",
+            "over time",
+        ),
+    ),
+)
+_PHRASE_STOP = {
+    "last", "this", "next", "between", "for", "in", "on", "from", "since", "and",
+    "or", "with", "during", "over", "per", "each", "do", "does", "did", "sold",
+    "use", "have", "has", "the", "most", "least", "is", "are", "was", "were",
+}  # fmt: skip
+
+
+def _field_stems(field: FieldProfile) -> set[str]:
+    from mcp_server_creator.profiling import name_words
+
+    return {w[:4] for w in name_words(field.name) if len(w) >= 3}
+
+
+def _phrase_after(text: str, marker: str) -> list[str]:
+    """The words that follow a marker, up to the next connective."""
+    match = re.search(rf"\b{marker}\s+([a-z0-9 ]+)", text)
+    if not match:
+        return []
+    words: list[str] = []
+    for word in match.group(1).split():
+        if word in _PHRASE_STOP:
+            break
+        words.append(word)
+    return words[:4]
+
+
+def _best_field(words: list[str], fields: list[FieldProfile]) -> FieldProfile | None:
+    stems = {w[:4] for w in words if len(w) >= 3}
+    best, best_score = None, 0
+    for field in fields:
+        score = len(stems & _field_stems(field))
+        if score > best_score:
+            best, best_score = field, score
+    return best
+
+
+def _job_measure(text: str, measures: list[FieldProfile]) -> FieldProfile | None:
+    """The measure a question asks about, through the user's own words."""
+    from mcp_server_creator.profiling import name_words
+
+    words = re.findall(r"[a-z]+", text)
+    # A word with a synonym list is matched only through it, so 'units'
+    # means quantity and never the unitPrice column that shares its stem.
+    stems = {
+        w[:4]
+        for w in words
+        if len(w) >= 3 and w not in _STOP and w not in _MEASURE_SYNONYMS
+    }
+    best, best_score = None, 0
+    for field in measures:
+        field_words = set(name_words(field.name))
+        score = 3 * len(stems & _field_stems(field))
+        for word in words:
+            if any(syn in field_words for syn in _MEASURE_SYNONYMS.get(word, ())):
+                score += 3
+                break
+        if score and field_words & {"total", "amount"}:
+            score += 1
+        if score > best_score:
+            best, best_score = field, score
+    return best
+
+
+def _job_tool(
+    spec: ServerSpec, source: DataSourceProfile, job: str
+) -> tuple[ToolPlan | None, str]:
+    """One tool that answers one recorded question, or the reason it cannot."""
+    text = " " + job.lower().replace("?", " ").replace(",", " ") + " "
+    usable = [f for f in source.fields if not f.pii]
+    measures = [f for f in usable if f.role is FieldRole.MEASURE]
+    dates = [f for f in usable if f.role is FieldRole.DATE]
+    groupable = [
+        f
+        for f in usable
+        if f.role
+        in {FieldRole.DIMENSION, FieldRole.IDENTIFIER, FieldRole.GEO, FieldRole.FLAG}
+    ]
+    sql = source.kind is SourceKind.UC_TABLE
+
+    granularity = ""
+    for grain, cues in _GRAIN_CUES:
+        if any(cue in text for cue in cues):
+            granularity = grain
+            break
+    measure = _job_measure(text, measures)
+    if any(cue in text for cue in _AVG_CUES):
+        aggregation = "avg"
+    elif any(cue in text for cue in _COUNT_CUES) or measure is None:
+        aggregation = "count"
+    else:
+        aggregation = "sum"
+    if aggregation == "count":
+        wants_amount = any(
+            w in _MEASURE_SYNONYMS for w in re.findall(r"[a-z]+", text)
+        ) and not any(cue in text for cue in _COUNT_CUES)
+        if wants_amount:
+            return (
+                None,
+                f"'{job}': no numeric column in '{source.name}' holds that amount.",
+            )
+        measure = None
+    if aggregation == "avg" and measure is None:
+        return None, f"'{job}': no numeric column in '{source.name}' to average."
+
+    group: FieldProfile | None = None
+    by_words = _phrase_after(text, "by")
+    if by_words and by_words[0] not in {"day", "week", "month", "year", "quarter"}:
+        group = _best_field(by_words, groupable)
+    if group is None and not granularity:
+        group = _best_field(_phrase_after(text, "which"), groupable)
+
+    entity: FieldProfile | None = None
+    entity_value = ""
+    for word, value in re.findall(r"\b([a-z]+)\s+(\d[\w-]*)", text):
+        candidate = _best_field([word], [f for f in groupable if f is not group])
+        if candidate is not None:
+            entity, entity_value = candidate, value
+            break
+
+    wants_range = bool(_RANGE_CUES.search(text))
+    counting = any(cue in text for cue in _COUNT_CUES)
+    if not (measure or group or entity or granularity or wants_range or counting):
+        # Nothing in the question names this source's data: no tool, and the
+        # question is reported as unanswered rather than given a bare count.
+        return None, ""
+    if (granularity or wants_range) and not dates:
+        return None, f"'{job}': '{source.name}' has no date field for this period."
+    if not sql and (
+        aggregation != "sum" or granularity not in {"", "month"} or wants_range
+    ):
+        return None, (
+            f"'{job}': needs averages, counts, a date range or a finer time grain, "
+            "which only a Unity Catalog table source supports here."
+        )
+    date = _rank(dates, spec)[0] if dates else None
+
+    if granularity:
+        pattern = QueryPattern.TREND
+    elif group is not None:
+        pattern = QueryPattern.RANK
+    else:
+        pattern = QueryPattern.AGGREGATE
+
+    params: list[ParamPlan] = []
+    if entity is not None:
+        params.append(
+            ParamPlan(
+                name=to_identifier(entity.name),
+                python_type="str",
+                description=(
+                    f"Only rows for this {entity.name}, e.g. {entity_value}. "
+                    "Leave empty for all."
+                ),
+                required=False,
+                source_field=entity.name,
+            )
+        )
+    if wants_range and date is not None and sql:
+        params += [
+            ParamPlan(
+                name="start_date",
+                python_type="str",
+                description=(
+                    "First day to include, YYYY-MM-DD. Work out relative periods "
+                    "such as 'last month' from today's date. Empty for no bound."
+                ),
+                required=False,
+                source_field=date.name,
+                operator=">=",
+            ),
+            ParamPlan(
+                name="end_date",
+                python_type="str",
+                description=(
+                    "Day after the last day to include, YYYY-MM-DD (exclusive). "
+                    "Empty for no bound."
+                ),
+                required=False,
+                source_field=date.name,
+                operator="<",
+            ),
+        ]
+    taken = {p.source_field for p in params}
+    if group is not None:
+        taken.add(group.name)
+    params += [
+        p
+        for p in _filter_params(source, spec=spec)
+        if p.source_field not in taken and p.name not in {q.name for q in params}
+    ]
+
+    measure_label = measure.name if measure is not None else "count"
+    if aggregation == "avg":
+        measure_label = f"avg_{measure_label}"
+    agg_word = {"sum": "total", "avg": "average", "count": "count"}[aggregation]
+    # Human wording, separate from the name slug: "total totalPrice",
+    # "average fare_amount", "record count" -- never "count count".
+    if measure is None:
+        phrase = "record count"
+    else:
+        phrase = f"{'average' if aggregation == 'avg' else 'total'} {measure.name}"
+    if pattern is QueryPattern.TREND:
+        grain_word = {"day": "daily", "week": "weekly", "month": "monthly"}[granularity]
+        name = _tool_name(spec.tool_prefix, grain_word, measure_label)
+        title = f"{grain_word.title()} {phrase}"
+        returns = (
+            f"One row per {granularity} with the {phrase} and record count, plus "
+            "the change and percentage change against the prior period."
+        )
+    elif pattern is QueryPattern.RANK:
+        name = _tool_name(spec.tool_prefix, "top", group.name, "by", measure_label)
+        title = f"Top {group.name} by {phrase}"
+        returns = (
+            f"Groups of {group.name} ordered by {phrase}, with "
+            "record counts and, for totals and counts, each group's share."
+        )
+    else:
+        name = _tool_name(spec.tool_prefix, agg_word, measure_label)
+        title = phrase[0].upper() + phrase[1:]
+        returns = "Record count and the measure's sum, mean, minimum and maximum."
+
+    return (
+        ToolPlan(
+            name=name,
+            title=title,
+            goal=job,
+            pattern=pattern,
+            source=source.name,
+            params=params,
+            paginated=pattern is QueryPattern.RANK,
+            returns=returns,
+            error_hints=["Drop a filter, or widen the date range."],
+            eval_seeds=[job],
+            measure_field=measure.name if measure is not None else "",
+            group_field=group.name if group is not None else "",
+            date_field=date.name if date is not None else "",
+            aggregation=aggregation,
+            granularity=granularity or "month",
+        ),
+        "",
+    )
+
+
+def _job_tools(
+    spec: ServerSpec, source: DataSourceProfile
+) -> tuple[list[ToolPlan], list[str]]:
+    """Tools for every recorded question this source can answer."""
+    plans: list[ToolPlan] = []
+    notes: list[str] = []
+    for job in spec.jobs_to_be_done:
+        plan, reason = _job_tool(spec, source, job)
+        if plan is None:
+            if reason:
+                notes.append(reason)
+            continue
+        twin = next((p for p in plans if p.name == plan.name), None)
+        if twin is not None:
+            if plan.params and {q.name for q in plan.params} != {
+                q.name for q in twin.params
+            }:
+                plan.name = _tool_name(plan.name, "filtered")
+            else:
+                twin.eval_seeds.append(job)
+                continue
+        plans.append(plan)
+    return plans, notes
+
+
 def _structured_tools(spec: ServerSpec, source: DataSourceProfile) -> list[ToolPlan]:
     """Propose the tools a tabular source can actually support."""
     plans: list[ToolPlan] = [_describe_tool(spec, source)]
     label = source.title or source.name.replace("_", " ")
-    identifiers = source.identifiers()
-    measures = source.measures()
-    dimensions = source.dimensions()
-    dates = source.dates()
-    text_fields = source.text_fields()
+    # Rank by the user's questions, so 'UV index' picks uv_index rather
+    # than whichever measure happened to be profiled first.
+    # The lookup key is the record's own key (the one the grain or source name
+    # mentions), never a personal field and never a shared foreign key such
+    # as the franchise a question happens to mention.
+    grain_words = _tokens(f"{source.grain} {source.name} {source.title}")
+    identifiers = sorted(
+        [f for f in source.identifiers() if not f.pii],
+        key=lambda f: -len(_tokens(f.name.replace("ID", " id")) & grain_words),
+    )
+    measures = _rank(source.measures(), spec)
+    dimensions = _rank(source.dimensions(), spec)
+    dates = _rank(source.dates(), spec)
+    text_fields = _rank(source.text_fields(), spec)
 
     if identifiers:
         key = identifiers[0]
@@ -200,7 +569,7 @@ def _structured_tools(spec: ServerSpec, source: DataSourceProfile) -> list[ToolP
                         ),
                         required=True,
                     ),
-                    *_filter_params(source),
+                    *_filter_params(source, spec=spec),
                 ],
                 paginated=True,
                 returns=(
@@ -211,6 +580,10 @@ def _structured_tools(spec: ServerSpec, source: DataSourceProfile) -> list[ToolP
                 eval_seeds=_seeds(source, QueryPattern.SEARCH),
             )
         )
+
+    job_plans, _ = _job_tools(spec, source)
+    if job_plans:
+        return plans + job_plans
 
     if measures and dimensions:
         measure = measures[0]
@@ -227,7 +600,7 @@ def _structured_tools(spec: ServerSpec, source: DataSourceProfile) -> list[ToolP
                 ),
                 pattern=QueryPattern.RANK,
                 source=source.name,
-                params=[*_filter_params(source)],
+                params=[*_filter_params(source, spec=spec)],
                 paginated=True,
                 returns=(
                     "The top groups with their measure total, record count, "
@@ -250,7 +623,7 @@ def _structured_tools(spec: ServerSpec, source: DataSourceProfile) -> list[ToolP
                 ),
                 pattern=QueryPattern.AGGREGATE,
                 source=source.name,
-                params=[*_filter_params(source)],
+                params=[*_filter_params(source, spec=spec)],
                 returns=(
                     "Record count and the measure's sum, mean, minimum, and "
                     "maximum for the filtered scope."
@@ -271,7 +644,7 @@ def _structured_tools(spec: ServerSpec, source: DataSourceProfile) -> list[ToolP
                 ),
                 pattern=QueryPattern.TREND,
                 source=source.name,
-                params=[*_filter_params(source)],
+                params=[*_filter_params(source, spec=spec)],
                 returns=(
                     "One row per month with the measure total, record count, "
                     "and the change and percentage change against the prior "
@@ -305,7 +678,7 @@ def _unstructured_tools(spec: ServerSpec, source: DataSourceProfile) -> list[Too
                     description="The question, in plain language.",
                     required=True,
                 ),
-                *_filter_params(source, limit=2),
+                *_filter_params(source, limit=2, spec=spec),
                 ParamPlan(
                     name="max_passages",
                     python_type="int",
@@ -473,12 +846,68 @@ def design_tools(spec: ServerSpec) -> tuple[list[ToolPlan], list[str]]:
             "between five."
         )
 
-    jobs = list(spec.jobs_to_be_done)
-    for index, plan in enumerate(unique):
-        if index < len(jobs):
-            plan.eval_seeds = [jobs[index]] + plan.eval_seeds
+    for source in spec.data_sources:
+        if source.modality is not DataModality.UNSTRUCTURED and source.kind in {
+            SourceKind.UC_TABLE,
+            SourceKind.LOCAL_SNAPSHOT,
+        }:
+            notes.extend(_job_tools(spec, source)[1])
+    pii = [f.name for s in spec.data_sources for f in s.fields if f.pii]
+    if pii:
+        notes.append(
+            "Personal fields are excluded from every tool's results, filters and "
+            "groupings: " + ", ".join(pii) + "."
+        )
+
+    unmatched = _assign_jobs(spec, unique)
+    if unmatched:
+        notes.append(
+            "No proposed tool clearly answers: "
+            + "; ".join(f"'{job}'" for job in unmatched)
+            + ". Profile the field it needs, or add a tool for it by hand."
+        )
 
     return unique, notes
+
+
+def _assign_jobs(spec: ServerSpec, plans: list[ToolPlan]) -> list[str]:
+    """Give each recorded question to the tool whose fields it mentions.
+
+    The question becomes that tool's first golden question, in the user's
+    own words. Returns the questions no tool matched.
+    """
+    unmatched: list[str] = []
+    candidates = [p for p in plans if p.pattern is not QueryPattern.DESCRIBE_SOURCE]
+    for job in spec.jobs_to_be_done:
+        wanted = _tokens(job)
+        best, best_score = None, 0
+        for plan in candidates:
+            vocabulary = _tokens(
+                " ".join([plan.name, plan.title, plan.goal])
+                + " "
+                + " ".join(p.name for p in plan.params)
+            )
+            score = len(vocabulary & wanted) + _pattern_bonus(job, plan.pattern)
+            if score > best_score:
+                best, best_score = plan, score
+        if best is None:
+            unmatched.append(job)
+            continue
+        best.eval_seeds = [job] + [s for s in best.eval_seeds if s != job]
+    return unmatched
+
+
+def _pattern_bonus(job: str, pattern: QueryPattern) -> int:
+    """A nudge from the question's shape: 'which ... most' ranks, and so on."""
+    text = job.lower()
+    cues = {
+        QueryPattern.RANK: ("which", "most", "highest", "lowest", "top", "rank"),
+        QueryPattern.AGGREGATE: ("total", "how many", "how much", "sum", "average"),
+        QueryPattern.TREND: ("trend", "over time", "month", "change", "moved"),
+        QueryPattern.LOOKUP: ("show me the", "details", "record for"),
+        QueryPattern.SEARCH: ("mention", "search", "find", "contain"),
+    }
+    return 1 if any(cue in text for cue in cues.get(pattern, ())) else 0
 
 
 def analyze_gaps(spec: ServerSpec) -> list[SpecGap]:

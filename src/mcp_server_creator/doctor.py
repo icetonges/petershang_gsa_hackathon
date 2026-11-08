@@ -1,7 +1,7 @@
 """Preflight check, runnable before anyone connects a client.
 
-    uv run mcp-server-creator-doctor
-    uv run mcp-server-creator-doctor --environment gov_il5
+    uv run mcp-a-creator-doctor
+    uv run mcp-a-creator-doctor --environment gov_il5
 
 The first gate is whether the thing starts at all. This answers that in one
 command, in plain language, and exits non-zero only when something is
@@ -167,7 +167,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     profile = environments.EnvironmentProfile(args.environment)
 
-    print("MCP Server Creator: preflight\n")
+    print("MCP A Creator: preflight\n")
     problems = check_core()
     print()
     _check_optional(profile)
@@ -181,8 +181,8 @@ def main(argv: list[str] | None = None) -> int:
         print("\nFix those, then run this again.")
         return 1
     print("Ready. Connect a client with:")
-    print('  {"mcpServers": {"mcp-server-creator": {"command": "uv",')
-    print('    "args": ["run", "mcp-server-creator"], "cwd": "<this repo>"}}}')
+    print('  {"mcpServers": {"mcp-a-creator": {"command": "uv",')
+    print('    "args": ["run", "mcp-a-creator"], "cwd": "<this repo>"}}}')
     print("\nThen say: I want to build an MCP server over my data.")
     return 0
 

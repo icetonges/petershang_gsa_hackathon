@@ -1,6 +1,8 @@
 # Runtime dependencies. Databricks Apps reads this file when it builds the
 # app, so keep it in step with pyproject.toml.
-fastmcp>=2.0.0
+# Pinned to 2.x: FastMCP 4.x targets the sessionless MCP 2026-07-28 spec,
+# which the Databricks MCP client may not negotiate.
+fastmcp>=2.14,<3
 httpx>=0.27.0
 pydantic>=2.0.0
 pydantic-settings>=2.0.0
@@ -12,3 +14,8 @@ ruff>=0.6.0
 # parsing a pasted schema.
 databricks-sdk>=0.30.0
 databricks-sql-connector>=3.0.0
+
+# Evaluation traces to the MLflow experiment attached as an app resource.
+# mlflow-skinny, not mlflow-tracing: the tracing-only package fails to import
+# when any other mlflow distribution is present in the environment.
+mlflow-skinny>=3.12,<4

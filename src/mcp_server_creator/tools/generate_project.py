@@ -23,6 +23,29 @@ from mcp_server_creator.utils import truncate
 MAX_CONTENT_FILES = 10
 
 
+def _match_path(requested: str, paths: list[str]) -> tuple[str | None, list[str]]:
+    """Exact path, else a unique path ending in it, else one sharing its name.
+
+    Clients often ask for 'app.yaml' or 'tools/search.py' without the
+    package prefix; refusing those wastes a round trip.
+    """
+    wanted = requested.strip().lstrip("./")
+    if wanted in paths:
+        return wanted, []
+    suffix = [p for p in paths if p.endswith("/" + wanted)]
+    if len(suffix) == 1:
+        return suffix[0], []
+    if suffix:
+        return None, sorted(suffix)
+    name = wanted.rsplit("/", 1)[-1]
+    same_name = [p for p in paths if p.rsplit("/", 1)[-1] == name]
+    if len(same_name) == 1:
+        return same_name[0], []
+    stem = name.rsplit(".", 1)[0].lower()
+    similar = [p for p in paths if stem and stem in p.lower()]
+    return None, sorted(same_name or similar)
+
+
 def register(mcp: FastMCP) -> None:
     """Register the project generator with the MCP server."""
 
@@ -121,12 +144,18 @@ def register(mcp: FastMCP) -> None:
         contents: dict[str, str] = {}
         unknown: list[str] = []
         by_path = {generated.path: generated for generated in manifest.files}
+        resolved_as: dict[str, str] = {}
+        did_you_mean: dict[str, list[str]] = {}
         for path in requested[:MAX_CONTENT_FILES]:
-            generated = by_path.get(path.strip())
-            if generated is None:
+            match, candidates = _match_path(path, list(by_path))
+            if match is None:
                 unknown.append(path)
+                if candidates:
+                    did_you_mean[path] = candidates[:5]
                 continue
-            contents[path.strip()] = truncate(generated.content, 60_000)
+            if match != path.strip():
+                resolved_as[path] = match
+            contents[match] = truncate(by_path[match].content, 60_000)
 
         result: dict[str, Any] = {
             "design_id": design_id or "",
@@ -146,8 +175,13 @@ def register(mcp: FastMCP) -> None:
             result["unknown_paths"] = unknown
             result["hint"] = (
                 "Those paths are not in the index. Copy a path exactly as "
-                "the index spells it."
+                "the index spells it"
+                + (", or pick one from did_you_mean." if did_you_mean else ".")
             )
+        if did_you_mean:
+            result["did_you_mean"] = did_you_mean
+        if resolved_as:
+            result["resolved_paths"] = resolved_as
         if len(requested) > MAX_CONTENT_FILES:
             result["note"] = (
                 f"Only the first {MAX_CONTENT_FILES} requested files were "

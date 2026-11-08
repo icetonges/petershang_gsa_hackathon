@@ -1,4 +1,4 @@
-# Databricks Apps runtime configuration for mcp-server-creator.
+# Databricks Apps runtime configuration for mcp-a-creator.
 #
 # `command` is a sequence and is NOT run through a shell, so environment
 # variables are not expanded in it. The one exception is DATABRICKS_APP_PORT,

@@ -24,7 +24,7 @@ def register(mcp: FastMCP) -> None:
             {
                 "skills": library.list_skills(),
                 "knowledge": library.list_knowledge(),
-                "start_with": "mcp-server-creator",
+                "start_with": "mcp-a-creator",
             },
             indent=2,
         )
@@ -50,7 +50,7 @@ def register(mcp: FastMCP) -> None:
         """What this server is for and how to drive it."""
         return json.dumps(
             {
-                "name": "MCP Server Creator",
+                "name": "MCP A Creator",
                 "version": __version__,
                 "purpose": (
                     "Turns a person's intent and their own structured or "
@@ -59,7 +59,7 @@ def register(mcp: FastMCP) -> None:
                 ),
                 "sequence": [
                     "creator_list_library",
-                    "creator_load_document('mcp-server-creator')",
+                    "creator_load_document('mcp-a-creator')",
                     "creator_start_design",
                     "creator_profile_data_source (once per source)",
                     "creator_design_tools",

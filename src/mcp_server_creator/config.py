@@ -6,6 +6,7 @@ Copy `.env.example` to `.env` for local development.
 
 from __future__ import annotations
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -43,17 +44,34 @@ class Settings(BaseSettings):
     creator_design_store: str = "memory"
     creator_design_dir: str = ""
 
+    # ── Tool-call traces ──────────────────────────────────────────────────────
+    # One JSON line per tool call to stdout: tool, caller, duration, outcome.
+    # Never arguments or results. Set CREATOR_TRACE_DIR to a /Volumes/...
+    # directory to also keep each trace in a volume.
+    creator_trace_enabled: bool = True
+    creator_trace_dir: str = ""
+    # MLflow traces for evaluation (on when MLFLOW_EXPERIMENT_ID is set):
+    # 'full' keeps clipped inputs and outputs, 'metadata' keeps neither.
+    creator_mlflow_capture: str = "full"
+
     # ── Optional live data profiling ──────────────────────────────────────────
     # When the server runs as a Databricks App, Databricks injects
     # DATABRICKS_HOST / DATABRICKS_CLIENT_ID / DATABRICKS_CLIENT_SECRET, and
     # app.yaml can bind a warehouse id. With those present, profiling can
     # inspect a real Unity Catalog table instead of parsing pasted DDL.
     creator_enable_live_profiling: bool = True
+    # Profile as the calling user when Databricks Apps forwards their token
+    # (user authorization with the `sql` scope). The app's service principal
+    # is the fallback. Turn off to always profile as the app.
+    creator_profile_as_user: bool = True
     databricks_host: str = ""
     databricks_warehouse_id: str = ""
     databricks_client_id: str = ""
-    databricks_client_secret: str = ""
-    databricks_token: str = ""
+    # Read from the environment that Databricks Apps injects; never set in
+    # code (the empty defaults are not secrets, hence nosemgrep). repr=False
+    # keeps them out of reprs, logs, and tracebacks.
+    databricks_client_secret: str = Field(default="", repr=False)  # nosemgrep
+    databricks_token: str = Field(default="", repr=False)  # nosemgrep
 
     @property
     def live_profiling_available(self) -> bool:

@@ -112,7 +112,7 @@ def test_grants_file_names_the_governed_sources(manifest):
     content = next(
         f.content for f in manifest.files if f.path == "deploy/databricks/grants.sql"
     )
-    assert "GRANT SELECT ON TABLE main.acquisition.contract_awards" in content
+    assert "GRANT SELECT ON TABLE `main`.`acquisition`.`contract_awards`" in content
     assert "service principal" in content.lower()
 
 

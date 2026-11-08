@@ -116,7 +116,7 @@ For a quick local test with an MCP client that supports HTTP + headers:
 ```json
 {
   "mcpServers": {
-    "mcp-server-creator": {
+    "mcp-a-creator": {
       "type": "http",
       "url": "https://<app-url>/mcp",
       "headers": { "Authorization": "Bearer <DATABRICKS_TOKEN>" }
@@ -184,5 +184,5 @@ listing exactly what they need.
 ## Registering it
 
 - Workspace UI: Unity Gateway, then MCPs, then + MCP.
-- Coding agents: `ug mcp add --names "app:mcp-server-creator"`.
+- Coding agents: `ug mcp add --names "app:mcp-a-creator"`.
 - Python agents: pass `https://<app-url>/mcp` to the framework's MCP client.

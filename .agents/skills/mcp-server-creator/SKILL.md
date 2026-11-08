@@ -1,9 +1,9 @@
 ---
-name: mcp-server-creator
-description: Pointer to this repository's bundled MCP server creation skill library. Use when working inside this repository on the mcp-server-creator server itself, or when you need the full skills for designing, generating, evaluating, deploying, or reviewing a custom MCP server on Databricks.
+name: mcp-a-creator
+description: Pointer to this repository's bundled MCP server creation skill library. Use when working inside this repository on the MCP A Creator server itself, or when you need the full skills for designing, generating, evaluating, deploying, or reviewing a custom MCP server on Databricks.
 ---
 
-# MCP server creator — in-repo pointer
+# MCP A Creator — in-repo pointer
 
 The full skill library lives inside the package, not here, because a deployed
 Databricks App only receives the synced source tree and `.dockerignore`
@@ -14,7 +14,7 @@ excludes `.agents/`. Anything the running server must serve has to live under
 
 ```
 src/mcp_server_creator/skills/
-├── mcp-server-creator/        # entry point: the six-phase build sequence
+├── mcp-server-creator/        # entry point skill `mcp-a-creator`: the six-phase build sequence
 ├── mcp-tool-design/           # naming, parameters, docstrings, returns, errors
 ├── structured-data-mcp/       # UC tables, SQL, UC functions, Genie, REST
 ├── unstructured-data-mcp/     # extraction, chunking, AI Search, citations

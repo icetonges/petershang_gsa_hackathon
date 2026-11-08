@@ -19,7 +19,7 @@ from typing import Annotated, Any
 from fastmcp import FastMCP
 from pydantic import Field
 
-from mcp_server_creator import environments, live
+from mcp_server_creator import designs, environments, live, tracing
 from mcp_server_creator.config import settings
 from mcp_server_creator.designs import store_mode
 
@@ -80,14 +80,30 @@ def register(mcp: FastMCP) -> None:
             "warehouse_configured": bool(settings.databricks_warehouse_id),
             "host_configured": bool(settings.databricks_host),
             "design_store": store_mode(),
+            "design_store_shared": designs.is_durable(),
+            "profiling_identity": live.identity(),
+            "evaluation_tracing": {
+                **tracing.mlflow_status(),
+                "upload_probe": tracing.upload_probe(),
+            },
         }
+        if designs.last_volume_error:
+            probe["design_store_warning"] = (
+                "The last volume write failed, so designs fell back to this "
+                "replica's memory: " + designs.last_volume_error
+            )
         if live.available():
             probe["attempted"] = True
             probe["note"] = (
                 "Credentials and a warehouse are configured, so "
                 "creator_add_data_source can read a real table's schema, "
                 "row count and distinct values instead of parsing pasted "
-                "text."
+                f"text. It runs as the {live.identity()}"
+                + (
+                    ", so it sees exactly the tables you can read."
+                    if live.identity() == live.USER_IDENTITY
+                    else ", which needs its own grants on each table."
+                )
             )
         else:
             probe["note"] = (

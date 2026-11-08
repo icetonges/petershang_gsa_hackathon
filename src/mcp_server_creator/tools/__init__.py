@@ -18,6 +18,7 @@ from __future__ import annotations
 from mcp_server_creator.tools import (
     add_data_source,
     check_environment,
+    deploy_server,
     design_tools,
     generate_project,
     list_library,
@@ -39,6 +40,7 @@ def register_tools(mcp) -> None:
     review_server.register(mcp)
     generate_project.register(mcp)
     write_project.register(mcp)
+    deploy_server.register(mcp)
 
 
 __all__ = ["register_tools"]

@@ -7,6 +7,8 @@ contain uses double-quoted docstrings. `{{token}}` placeholders are filled by
 
 from __future__ import annotations
 
+import pprint
+
 from mcp_server_creator.generators import dataaccess, toolcode
 from mcp_server_creator.models import (
     DataClassification,
@@ -75,15 +77,36 @@ def main() -> None:
     """
     platform_port = os.getenv("DATABRICKS_APP_PORT") or os.getenv("PORT")
     if platform_port:
-        # "streamable-http" is accepted by every FastMCP release that
-        # has the transport at all; "http" is a newer alias. An
-        # internal package mirror pinned to an older version would
-        # reject the alias, so use the name that always works.
-        mcp.run(
-            transport="streamable-http",
-            host="0.0.0.0",
-            port=int(platform_port),
+        # Databricks Apps and Genie Code need a STATELESS streamable-HTTP
+        # server at /mcp, and the workspace origin must pass CORS.
+        import uvicorn
+        from starlette.middleware import Middleware
+        from starlette.middleware.cors import CORSMiddleware
+
+        host = os.getenv("DATABRICKS_HOST", "").rstrip("/")
+        if host and not host.startswith("http"):
+            host = f"https://{host}"
+        extra = [
+            o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()
+        ]
+        origins = [o for o in [host, *extra] if o]
+        app = mcp.http_app(
+            path="/mcp",
+            stateless_http=True,
+            middleware=[
+                Middleware(
+                    CORSMiddleware,
+                    allow_origins=origins or ["*"],
+                    allow_credentials=bool(origins),
+                    allow_methods=["*"],
+                    allow_headers=["*"],
+                    expose_headers=["mcp-session-id"],
+                )
+            ],
         )
+        # The platform's proxy reaches the app only on all interfaces; the
+        # app is not exposed directly, and every request is authenticated.
+        uvicorn.run(app, host="0.0.0.0", port=int(platform_port))  # nosec B104
     elif settings.mcp_transport == "streamable-http":
         mcp.run(
             transport="streamable-http",
@@ -107,6 +130,7 @@ Locally, copy `.env.example` to `.env`.
 
 from __future__ import annotations
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -121,7 +145,9 @@ class Settings(BaseSettings):
 
     # ── Transport ─────────────────────────────────────────────────────────
     mcp_transport: str = "stdio"
-    mcp_host: str = "0.0.0.0"
+    # Local HTTP binds to loopback by default. Set MCP_HOST=0.0.0.0 only in
+    # a container behind a proxy; Databricks Apps binds all interfaces itself.
+    mcp_host: str = "127.0.0.1"
     mcp_port: int = 8000
 
     # ── Databricks ────────────────────────────────────────────────────────
@@ -129,13 +155,15 @@ class Settings(BaseSettings):
     databricks_host: str = ""
     databricks_warehouse_id: str = ""
     databricks_client_id: str = ""
-    databricks_client_secret: str = ""
-    databricks_token: str = ""
+    # Credentials are never set in code (the empty defaults are not secrets,
+    # hence nosemgrep); repr=False keeps them out of logs and tracebacks.
+    databricks_client_secret: str = Field(default="", repr=False)  # nosemgrep
+    databricks_token: str = Field(default="", repr=False)  # nosemgrep
 
     # ── Upstream API ──────────────────────────────────────────────────────
     # Only used when a tool reads a REST source. The origin itself is fixed
     # in data/rest.py; this is the credential, never the destination.
-    api_key: str = ""
+    api_key: str = Field(default="", repr=False)  # nosemgrep
 
     query_timeout_seconds: float = 60.0
 
@@ -158,9 +186,17 @@ from starlette.responses import JSONResponse
 
 from {{package}} import __version__
 
+# What a person sees when they open the app URL in a browser. MCP clients
+# use /mcp; this only describes the server and how to connect it.
+LANDING: dict = {{landing}}
+
 
 def register_routes(mcp: FastMCP) -> None:
     """Register custom HTTP routes with the server."""
+
+    @mcp.custom_route("/", methods=["GET"])
+    async def root(request: Request) -> JSONResponse:
+        return JSONResponse({**LANDING, "status": "running", "version": __version__})
 
     @mcp.custom_route("/health", methods=["GET"])
     async def health_check(request: Request) -> JSONResponse:
@@ -399,10 +435,93 @@ def _dictionary_resource(spec: ServerSpec) -> str:
     )
 
 
+BUILT_BY = "Built with MCP A Creator."
+CONNECT_HINT = "Connect: Genie Code > Settings > Connectors > Custom MCP Server."
+APP_DESCRIPTION_LIMIT = 500
+
+
+def source_labels(spec: ServerSpec) -> list[str]:
+    """One readable location per data source, e.g. catalog.schema.table."""
+    labels: list[str] = []
+    for source in spec.data_sources:
+        parts = [p for p in (source.catalog, source.schema_name, source.table) if p]
+        label = (
+            ".".join(parts)
+            if source.table
+            else source.index_name or source.volume_path or source.name
+        )
+        labels.append(label)
+    return labels
+
+
+def app_description(spec: ServerSpec) -> str:
+    """The Databricks App description: what, for whom, tools, data, owner.
+
+    Always ends with the MCP A Creator annotation and stays within the
+    500-character limit Databricks Apps enforces. The purpose matters most,
+    so when space runs out the optional parts go first (connect hint, then
+    tool list, then user); the purpose is trimmed only as a last resort.
+    """
+    labels = source_labels(spec)
+    parts: dict[str, str] = {
+        "user": (
+            f"For {spec.primary_user.strip().rstrip('.')}." if spec.primary_user else ""
+        ),
+        "tools": (
+            "Tools: " + ", ".join(t.name for t in spec.tools) + "."
+            if spec.tools
+            else ""
+        ),
+        "data": ("Data: " + ", ".join(labels) + " (read-only)." if labels else ""),
+        "owner": f"Owner: {spec.maintainer}." if spec.maintainer else "",
+        "connect": CONNECT_HINT,
+        "built_by": BUILT_BY,
+    }
+    purpose = (spec.purpose or spec.title).strip()
+
+    def joined() -> str:
+        return " ".join(p for p in [purpose, *parts.values()] if p)
+
+    for optional in ("connect", "tools", "user", "owner", "data"):
+        if len(joined()) <= APP_DESCRIPTION_LIMIT:
+            break
+        parts[optional] = ""
+    over = len(joined()) - APP_DESCRIPTION_LIMIT
+    if over > 0:
+        purpose = purpose[: max(len(purpose) - over - 3, 0)].rstrip() + "..."
+    return joined()[:APP_DESCRIPTION_LIMIT]
+
+
+def landing_payload(spec: ServerSpec) -> dict[str, object]:
+    """The JSON served at '/' on a generated server."""
+    return {
+        "service": spec.server_name,
+        "name": spec.title,
+        "description": spec.purpose,
+        "primary_user": spec.primary_user,
+        "tools": [t.name for t in spec.tools],
+        "data": source_labels(spec),
+        "refuses": list(spec.out_of_scope),
+        "owner": spec.maintainer,
+        "how_to_use": [
+            "In Genie Code, open Settings > Connectors > Custom MCP Server.",
+            f"Choose {spec.deployment.app_name or spec.server_name}, then save.",
+            "Ask a question in your own words; the agent picks the tool.",
+        ],
+        "transport": "streamable-http (stateless)",
+        "mcp_endpoint": "/mcp",
+        "endpoints": {"health": "/health", "version": "/version"},
+        "built_by": "MCP A Creator",
+    }
+
+
 def package_files(spec: ServerSpec) -> dict[str, str]:
     """Every file inside the generated package directory."""
     package = spec.package_name
     values = {
+        "landing": pprint.pformat(
+            landing_payload(spec), indent=4, width=79, sort_dicts=False
+        ),
         "package": package,
         "title": docstring_safe(spec.title),
         "purpose": docstring_safe(spec.purpose),
@@ -465,6 +584,10 @@ extend-exclude = ["*.md"]
 [tool.ruff.lint]
 select = ["E", "F", "I"]
 
+[tool.bandit]
+# Tests use assert by design. Run: bandit -c pyproject.toml -r .
+exclude_dirs = ["tests", ".venv"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
@@ -517,7 +640,7 @@ ENV_EXAMPLE = """# ─── MCP transport ────────────�
 # Leave as stdio. app.py switches to HTTP automatically when a platform
 # injects DATABRICKS_APP_PORT or PORT.
 MCP_TRANSPORT=stdio
-MCP_HOST=0.0.0.0
+MCP_HOST=127.0.0.1
 MCP_PORT=8000
 
 # ─── Databricks ──────────────────────────────────────────────────────────────
@@ -619,6 +742,31 @@ SERVER_JSON = """{
   ]
 }
 """
+
+TEST_CONFTEST = '''"""Test-time compatibility across FastMCP versions.
+
+FastMCP 3 and later expose `list_tools()` and `list_prompts()`, which return
+lists. FastMCP 2.x exposes `get_tools()` and `get_prompts()`, which return
+dicts keyed by name. The tests use the newer names, so this adds them when
+the installed FastMCP is 2.x. Nothing outside the tests depends on it.
+"""
+
+from fastmcp import FastMCP
+
+if not hasattr(FastMCP, "list_tools"):
+
+    async def _list_tools(self):
+        return list((await self.get_tools()).values())
+
+    FastMCP.list_tools = _list_tools
+
+if not hasattr(FastMCP, "list_prompts"):
+
+    async def _list_prompts(self):
+        return list((await self.get_prompts()).values())
+
+    FastMCP.list_prompts = _list_prompts
+'''
 
 TEST_SERVER = '''"""Smoke tests: the server imports and every submodule registers.
 
@@ -1069,7 +1217,7 @@ be trusted on anything.
 def _dependencies(spec: ServerSpec) -> list[str]:
     """Runtime dependencies for the generated server."""
     deps = [
-        "fastmcp>=2.0.0",
+        "fastmcp>=2.14,<3",
         "pydantic>=2.0.0",
         "pydantic-settings>=2.0.0",
     ]
@@ -1309,6 +1457,7 @@ def repo_files(spec: ServerSpec) -> dict[str, str]:
         "SECURITY.md": render(SECURITY_DOC, values),
         "docs/limitations.md": render(LIMITATIONS_DOC, values),
         "tests/__init__.py": "",
+        "tests/conftest.py": TEST_CONFTEST,
         "tests/test_server.py": render(TEST_SERVER, values),
         "tests/test_security.py": render(TEST_SECURITY, values),
         "tests/test_portability.py": render(TEST_PORTABILITY, values),

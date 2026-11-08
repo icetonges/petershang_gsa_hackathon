@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import re
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -92,7 +92,7 @@ class AuthMode(str, Enum):
 
     NONE = "none"
     DATABRICKS_OAUTH = "databricks_oauth"
-    API_KEY = "api_key"
+    API_KEY = "api_key"  # nosemgrep -- an enum label, not a key
 
 
 class DataClassification(str, Enum):
@@ -137,6 +137,13 @@ class FieldProfile(BaseModel):
         description=(
             "Approximate distinct values. Under ~50 means the field can be "
             "exposed as an enum rather than a free-text filter."
+        ),
+    )
+    pii: bool = Field(
+        default=False,
+        description=(
+            "Personal information, such as a card number, email or phone. "
+            "Generated tools never return it, filter on it or group by it."
         ),
     )
     enum_values: list[str] = Field(
@@ -304,6 +311,10 @@ class ParamPlan(BaseModel):
     source_field: str = Field(
         default="", description="Field this parameter filters or selects."
     )
+    operator: Literal["=", ">=", "<"] = Field(
+        default="=",
+        description="How the value is compared: equality, or a date range bound.",
+    )
 
     @field_validator("name")
     @classmethod
@@ -345,6 +356,13 @@ class ToolPlan(BaseModel):
         default_factory=list,
         description="Draft golden questions this tool should be able to answer.",
     )
+    measure_field: str = Field(
+        default="", description="Measure this tool aggregates; empty means count."
+    )
+    group_field: str = Field(default="", description="Field a rank tool groups by.")
+    date_field: str = Field(default="", description="Date a trend or range uses.")
+    aggregation: Literal["sum", "avg", "count"] = Field(default="sum")
+    granularity: Literal["day", "week", "month"] = Field(default="month")
 
     @field_validator("name")
     @classmethod
@@ -405,7 +423,7 @@ class DeploymentPlan(BaseModel):
         default="sql_warehouse",
         description="Resource key bound in app.yaml via valueFrom.",
     )
-    secret_scope: str = Field(default="")
+    secret_scope: str = Field(default="")  # nosemgrep -- scope name, empty
     auth_mode: AuthMode = AuthMode.DATABRICKS_OAUTH
     use_bundle: bool = Field(
         default=True,

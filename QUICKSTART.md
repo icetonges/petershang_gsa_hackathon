@@ -13,7 +13,7 @@ uv sync
 ## 2. Check it will start
 
 ```bash
-uv run mcp-server-creator-doctor
+uv run mcp-a-creator-doctor
 ```
 
 One command, plain language: whether the server imports, which skills
@@ -25,7 +25,7 @@ Add the environment the servers you build will be deployed into, and it
 reports the constraints that apply there:
 
 ```bash
-uv run mcp-server-creator-doctor --environment gov_il5
+uv run mcp-a-creator-doctor --environment gov_il5
 ```
 
 ## 3. Run
@@ -47,9 +47,9 @@ Create or edit `.mcp.json` with an **absolute path** to this repository:
 ```json
 {
   "mcpServers": {
-    "mcp-server-creator": {
+    "mcp-a-creator": {
       "command": "uv",
-      "args": ["run", "mcp-server-creator"],
+      "args": ["run", "mcp-a-creator"],
       "cwd": "/absolute/path/to/petershang_gsa_hackathon"
     }
   }
@@ -70,14 +70,14 @@ Ask the client:
 > which contracts expire this quarter.
 
 A well-behaved client will call `creator_list_library`, load the
-`mcp-server-creator` skill, and start asking discovery questions before
+`mcp-a-creator` skill, and start asking discovery questions before
 writing anything. If it jumps straight to code, say "run discovery first".
 
 To drive it by hand:
 
 ```
 creator_list_library
-creator_load_document(name="mcp-server-creator")
+creator_load_document(name="mcp-a-creator")
 creator_check_environment(environment="gov_il5")
 creator_start_design(purpose="...", primary_user="...", jobs_to_be_done=[...])
   -> design_id="dsn_1a2b3c4d"

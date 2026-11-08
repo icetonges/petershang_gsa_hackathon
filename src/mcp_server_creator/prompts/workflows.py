@@ -28,7 +28,7 @@ def register(mcp: FastMCP) -> None:
             f"My data: {my_data or '(I will describe this)'}",
             "",
             "Work through this properly:",
-            "1. Load the mcp-server-creator skill with creator_load_document "
+            "1. Load the mcp-a-creator skill with creator_load_document "
             "and follow its six phases.",
             "2. Run discovery first. Ask me the questions you cannot infer, "
             "especially whose job this is and what questions they ask today "

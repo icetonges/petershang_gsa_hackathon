@@ -1,4 +1,4 @@
-# MCP Server Creator
+# MCP A Creator
 
 An MCP server whose domain is building MCP servers.
 
@@ -10,6 +10,85 @@ deployment kit, and the review that says whether it is any good.
 Built on the [GSA MCP hackathon template](https://github.com/GSA-TTS/mcp-hackathon-template),
 with [FastMCP](https://github.com/jlowin/fastmcp) and [uv](https://docs.astral.sh/uv/).
 Deployment target is Databricks Apps.
+
+---
+
+## Use it in Genie Code (tested)
+
+The deployed app (`mcp-a-creator`) works as a Genie Code connector:
+
+1. In Genie Code, open **Settings > Connectors > Custom MCP Server**.
+2. Select **mcp-a-creator** and save. The nine `creator_*` tools become
+   available immediately; no prompt changes needed.
+3. Ask for a server in plain words, starting with "Use MCP A Creator
+   to...", and name the user, their questions, and a table that exists.
+   These examples use the `samples` catalog, which every Unity Catalog
+   workspace has, and their dates fall inside each table's data (source:
+   `src/mcp_server_creator/examples.py`):
+
+   | For | Data | Prompt |
+   |---|---|---|
+   | Bakery franchise manager | `samples.bakehouse.sales_transactions`, `samples.bakehouse.sales_franchises` | Use MCP A Creator to build an MCP server for a bakery franchise manager. They ask: "Which franchise had the most revenue from May 1 to May 17, 2024?", "What are the top 5 products by revenue?" and "What were daily sales for one franchise?" It must refuse to show card numbers or individual customers. |
+   | Supply chain planner | `samples.tpch.lineitem`, `samples.tpch.orders` | Use MCP A Creator to build an MCP server for a supply chain planner who tracks deadlines. They ask: "Which line items arrived after their commit date in 1997?", "How many urgent orders are still open?" and "Which ship mode is late most often?" It must refuse questions about individual clerks. |
+   | City transportation analyst | `samples.nyctaxi.trips` | Use MCP A Creator to build an MCP server for a city transportation analyst. They ask: "What was the average fare per mile by pickup ZIP in January 2016?", "Which hour of the day is busiest?" and "What are the top 10 drop-off ZIPs?" It must refuse to identify individual riders or trips. |
+   | Customer experience lead | `samples.bakehouse.media_customer_reviews` (review text) | Use MCP A Creator to build an MCP server for a customer experience lead. They ask: "What do customers complain about most?", "Show reviews that mention wait times" and "Which franchise has the most negative reviews?" Every answer must cite the review date and franchise, and it must refuse to make up reviews. |
+   | Contracting officer | Your own awards table | Use MCP A Creator to build an MCP server for a contracting officer, using `<catalog.schema.awards>`. First confirm the table exists and find its end-date column. They ask: "Which awards expire in the next 90 days?" and "What is the total value by vendor?" It must refuse questions about individual employees. |
+
+   If a table does not exist or you cannot read it, the server says so
+   and offers a samples table instead of guessing its columns.
+
+Genie Code then runs the phases: environment check, discovery questions,
+data profiling, a proposed tool list for you to approve, and a generated
+project with tests, an evaluation set, and Databricks App config.
+
+Requirements that made this work: the app name starts with `mcp-`, the
+server is stateless streamable HTTP at `/mcp`, and the workspace origin is
+allowed by CORS.
+
+### App resources and identity
+
+| Resource / setting | Why |
+|---|---|
+| `sql_warehouse` (CAN USE) | Live table profiling (`DATABRICKS_WAREHOUSE_ID`). |
+| `storage`: volume `users.xiaobing_shang1_civ.mcp_a_creator` (WRITE VOLUME) | `designs/` shared design store across replicas, `projects/` output of `creator_write_project`, `traces/` tool-call logs. Reached through the Files API, because Apps do not mount `/Volumes`. |
+| `experiment`: MLflow experiment `/Users/xiaobing.shang1.civ@mail.mil/mcp-a-creator-traces` (CAN EDIT) | Evaluation traces: one trace per tool call with clipped inputs and outputs, the caller as trace user, and the design id as the session. |
+| User scopes `sql`, `workspace.workspace`, `apps` | Tables are profiled **as the calling user**, and the generated server is written to **their** folder and deployed as **their** app. The service principal is only the profiling fallback, and its use is reported. |
+
+The audit lines (Logs tab, `traces/` in the volume) record the tool name,
+caller, duration and outcome, never arguments or results. The MLflow
+traces carry inputs and outputs for evaluation, governed by the
+experiment's permissions; set `CREATOR_MLFLOW_CAPTURE=metadata` to drop
+them. No model serving endpoint is needed: the tools are deterministic,
+and the client's own model does the reasoning.
+
+### From design to a live server you own
+
+1. Design, profile, review, and generate as before.
+2. `creator_write_project` (destination `workspace`) writes to
+   `/Workspace/Users/<you>/mcp-servers/<server-name>`. If that folder does
+   not exist, the dry run returns an `approval` question (default yes).
+3. `creator_deploy_server` returns a security summary (blockers, write
+   tools, tables read, refusals) and a plan, and asks for approval
+   (default yes). With `approve=true` it creates the app as you, starts
+   it, deploys the folder, and on the last call returns the MCP URL to add
+   in Genie Code. It never touches an app owned by someone else.
+
+### Evaluating with the traces
+
+Each build is one MLflow session (the design id), so a whole build can be
+read and scored as one conversation:
+
+```python
+import mlflow
+traces = mlflow.search_traces(
+    locations=["3862390696919387"],
+    filter_string="tags.tool = 'creator_design_tools'",
+)
+```
+
+Useful checks: share of `outcome = tool_error` per tool, whether each
+recorded question ended up as a golden question, and review scores over
+time.
 
 ---
 
@@ -64,7 +143,7 @@ must serve has to live under `src/mcp_server_creator/`.
 
 | Skill | Covers |
 |---|---|
-| `mcp-server-creator` | Entry point: the six-phase build sequence, and routing to the rest |
+| `mcp-a-creator` | Entry point: the six-phase build sequence, and routing to the rest |
 | `mcp-tool-design` | Naming, parameters and enums, docstrings, return shapes, errors |
 | `structured-data-mcp` | UC tables, SQL safety, UC functions, Genie, REST, snapshots |
 | `unstructured-data-mcp` | Extraction, chunking, AI Search indexes, citations |
@@ -231,7 +310,7 @@ decides which exist.
 ```bash
 cp .env.example .env
 uv sync
-uv run mcp-server-creator-doctor     # will this even start here?
+uv run mcp-a-creator-doctor     # will this even start here?
 uv run python main.py
 ```
 
@@ -241,7 +320,7 @@ environment can run. It exits non-zero only when something is genuinely
 broken rather than merely unconfigured.
 
 ```bash
-uv run mcp-server-creator-doctor --environment gov_il5
+uv run mcp-a-creator-doctor --environment gov_il5
 ```
 
 The server starts in stdio mode and waits for a client. That is correct: a
@@ -252,9 +331,9 @@ Connect a client with an absolute path to this repository:
 ```json
 {
   "mcpServers": {
-    "mcp-server-creator": {
+    "mcp-a-creator": {
       "command": "uv",
-      "args": ["run", "mcp-server-creator"],
+      "args": ["run", "mcp-a-creator"],
       "cwd": "/absolute/path/to/petershang_gsa_hackathon"
     }
   }

@@ -1,0 +1,67 @@
+# Databricks Apps runtime configuration for mcp-a-creator.
+#
+# `command` is a sequence and is NOT run through a shell, so environment
+# variables are not expanded in it. The one exception is DATABRICKS_APP_PORT,
+# which the platform substitutes at runtime. Because this project uses a src/
+# layout, a shell is invoked explicitly to put the package on the path.
+#
+# Deploy with the kit script, which stages this file at the repository root
+# (where Databricks reads it from the deployed source) and syncs:
+#   bash deploy/databricks/deploy-databricks-app.sh
+#
+# Endpoints once deployed:
+#   https://<app-url>/mcp       Streamable HTTP, stateless
+#   https://<app-url>/health
+#   https://<app-url>/version
+#
+# Databricks injects at runtime: DATABRICKS_APP_PORT (default 8000),
+# DATABRICKS_HOST, DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET.
+command:
+  - /bin/sh
+  - -c
+  - >-
+    SP=$(python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])") &&
+    if [ -d "$SP/fastmcp/server/auth/oauth_proxy" ]; then
+    echo "Removing stale fastmcp/mcp files left by the 4.x install";
+    python -m pip uninstall -y -q fastmcp mcp;
+    rm -rf "$SP/fastmcp" "$SP/mcp";
+    python -m pip install --quiet --no-cache-dir -r /app/python/source_code/requirements.txt;
+    fi &&
+    export PYTHONPATH=/app/python/source_code/src:$PYTHONPATH &&
+    python -m mcp_server_creator.app
+
+env:
+  # Live Unity Catalog inspection in creator_profile_data_source needs a
+  # warehouse. Bind one as an app resource named `sql_warehouse` to enable
+  # it; without it, profiling falls back to parsing a pasted schema, which
+  # is the normal path.
+  - name: DATABRICKS_WAREHOUSE_ID
+    valueFrom: sql_warehouse
+
+  # Storage in the app's Unity Catalog volume (attached as the app resource
+  # `storage`, WRITE_VOLUME). Apps do not mount /Volumes, so the server uses
+  # the Files API as the app's service principal.
+  - name: CREATOR_DESIGN_STORE
+    value: "volume"
+  - name: CREATOR_DESIGN_DIR
+    value: "/Volumes/users/xiaobing_shang1_civ/mcp_a_creator/designs"
+  # creator_write_project stays a dry run unless the caller passes
+  # dry_run=false, and only ever writes under this folder.
+  - name: CREATOR_ALLOW_WRITE
+    value: "true"
+  - name: CREATOR_OUTPUT_ROOT
+    value: "/Volumes/users/xiaobing_shang1_civ/mcp_a_creator/projects"
+  # Tool name, caller, duration and outcome only; never inputs or outputs.
+  - name: CREATOR_TRACE_DIR
+    value: "/Volumes/users/xiaobing_shang1_civ/mcp_a_creator/traces"
+  # Evaluation traces: one MLflow trace per tool call, grouped by design id
+  # as the session. Experiment attached as the app resource `experiment`.
+  - name: MLFLOW_TRACKING_URI
+    value: "databricks"
+  - name: MLFLOW_EXPERIMENT_ID
+    valueFrom: experiment
+  # The experiment stores traces in Unity Catalog
+  # (users.xiaobing_shang1_civ.mcp_a_creator_otel_*). Reading them back, as the
+  # upload probe does, runs SQL on this warehouse.
+  - name: MLFLOW_TRACING_SQL_WAREHOUSE_ID
+    valueFrom: sql_warehouse
